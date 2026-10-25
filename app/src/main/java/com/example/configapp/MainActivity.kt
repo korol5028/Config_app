@@ -13,6 +13,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
@@ -24,29 +25,35 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme(background = BgDarkGreen)) {
-                App()
+            var currentTheme by remember { mutableStateOf(GreenTheme) }
+
+            MaterialTheme(colorScheme = darkColorScheme(background = currentTheme.bg)) {
+                App(currentTheme = currentTheme, onThemeChange = { currentTheme = it })
             }
         }
     }
 }
 
 @Composable
-fun App(vm: ConfigViewModel = viewModel()) {
+fun App(
+    currentTheme: AppTheme,
+    onThemeChange: (AppTheme) -> Unit,
+    vm: ConfigViewModel = viewModel()
+) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var showImport by remember { mutableStateOf(false) }
 
     Scaffold(
-        containerColor = BgDarkGreen,
+        containerColor = currentTheme.bg,
         bottomBar = {
-            FloatingBottomNav(selectedTab = selectedTab, onTabSelected = { selectedTab = it })
+            FloatingBottomNav(selectedTab, currentTheme) { selectedTab = it }
         },
         floatingActionButton = {
             if (selectedTab == 1) {
                 FloatingActionButton(
                     onClick = { showImport = true },
-                    containerColor = AccentGreen,
-                    contentColor = Color.Black
+                    containerColor = currentTheme.accent,
+                    contentColor = currentTheme.accentText
                 ) {
                     Icon(Icons.Default.Add, contentDescription = "Add")
                 }
@@ -55,15 +62,16 @@ fun App(vm: ConfigViewModel = viewModel()) {
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
             when (selectedTab) {
-                0 -> ConfigScreen(viewModel = vm, isMainScreen = true)
-                1 -> ConfigScreen(viewModel = vm, isMainScreen = false)
-                2 -> SettingsScreen()
+                0 -> ConfigScreen(viewModel = vm, theme = currentTheme)
+                1 -> ServersListScreen(currentTheme)
+                2 -> SettingsScreen(theme = currentTheme, onThemeChange = onThemeChange)
             }
         }
     }
 
     if (showImport) {
         ImportDialog(
+            theme = currentTheme,
             onDismiss = { showImport = false },
             onImport = { text ->
                 vm.importFromText(text)
@@ -74,63 +82,73 @@ fun App(vm: ConfigViewModel = viewModel()) {
 }
 
 @Composable
-fun FloatingBottomNav(selectedTab: Int, onTabSelected: (Int) -> Unit) {
+fun ServersListScreen(theme: AppTheme) {
+    Box(Modifier.fillMaxSize().background(theme.bg), contentAlignment = Alignment.Center) {
+        Text("Полный список серверов в разработке", color = theme.textGray)
+    }
+}
+
+@Composable
+fun FloatingBottomNav(selectedTab: Int, theme: AppTheme, onTabSelected: (Int) -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 32.dp, vertical = 16.dp)
-            .background(Color(0xFF1E2922), RoundedCornerShape(30.dp))
-            .padding(8.dp)
+            .padding(horizontal = 16.dp, vertical = 16.dp)
+            .background(theme.cardBg, RoundedCornerShape(24.dp))
+            .padding(vertical = 8.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            NavItem("Подключение", Icons.Default.PowerSettingsNew, 0, selectedTab, onTabSelected)
-            NavItem("Серверы", Icons.Default.Dns, 1, selectedTab, onTabSelected)
-            NavItem("Настройки", Icons.Default.Settings, 2, selectedTab, onTabSelected)
+            NavItem("Главная", Icons.Default.Home, 0, selectedTab, theme, onTabSelected)
+            NavItem("Сервера", Icons.Default.Dns, 1, selectedTab, theme, onTabSelected)
+            NavItem("Настройки", Icons.Default.Settings, 2, selectedTab, theme, onTabSelected)
         }
     }
 }
 
 @Composable
-fun RowScope.NavItem(title: String, icon: ImageVector, index: Int, selectedTab: Int, onTabSelected: (Int) -> Unit) {
+fun RowScope.NavItem(title: String, icon: ImageVector, index: Int, selectedTab: Int, theme: AppTheme, onTabSelected: (Int) -> Unit) {
     val isSelected = selectedTab == index
-    val color = if (isSelected) AccentGreen else TextGray
+    val color = if (isSelected) theme.accent else theme.textGray
+    val bgColor = if (isSelected) theme.selectedCardBg else Color.Transparent
     
     Column(
         modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(bgColor)
             .clickable { onTabSelected(index) }
-            .padding(8.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Icon(icon, contentDescription = title, tint = color)
         Spacer(modifier = Modifier.height(4.dp))
-        Text(title, color = color, fontSize = 10.sp)
+        Text(title, color = color, fontSize = 10.sp, fontWeight = FontWeight.Medium)
     }
 }
 
 @Composable
-private fun ImportDialog(onDismiss: () -> Unit, onImport: (String) -> Unit) {
+private fun ImportDialog(theme: AppTheme, onDismiss: () -> Unit, onImport: (String) -> Unit) {
     var text by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = CardDarkGreen,
-        title = { Text("Импорт", color = TextWhite) },
+        containerColor = theme.cardBg,
+        title = { Text("Импорт", color = theme.text) },
         text = {
             Column {
-                Text("Вставьте ссылку на конфиг или подписку:", color = TextGray)
+                Text("Вставьте ссылку на конфиг или подписку:", color = theme.textGray)
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },
                     modifier = Modifier.fillMaxWidth().height(200.dp),
-                    placeholder = { Text("vless://...\nили\nhttps://...", color = TextGray) }
+                    placeholder = { Text("vless://...\nили\nhttps://...", color = theme.textGray) }
                 )
             }
         },
-        confirmButton = { TextButton(onClick = { onImport(text) }) { Text("Добавить", color = AccentGreen) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена", color = TextGray) } }
+        confirmButton = { TextButton(onClick = { onImport(text) }) { Text("Добавить", color = theme.accent) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена", color = theme.textGray) } }
     )
 }
