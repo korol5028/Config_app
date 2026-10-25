@@ -11,11 +11,18 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.configapp.ui.ConfigScreen
 import com.example.configapp.ui.ConfigViewModel
+import com.example.configapp.ui.DarkBg
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme { App() } }
+        setContent {
+            MaterialTheme(
+                colorScheme = darkColorScheme(background = DarkBg)
+            ) {
+                App()
+            }
+        }
     }
 }
 
@@ -41,16 +48,17 @@ private fun ImportDialog(onDismiss: () -> Unit, onImport: (String) -> Unit) {
     var text by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Импорт конфигов") },
+        containerColor = Color(0xFF1E1E1E),
+        title = { Text("Импорт конфигов", color = Color.White) },
         text = {
             Column {
-                Text("Вставьте ссылки (каждая с новой строки):")
+                Text("Вставьте ссылки (каждая с новой строки):", color = Color.LightGray)
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },
                     modifier = Modifier.fillMaxWidth().height(220.dp),
-                    placeholder = { Text("vless://...\nvmess://...\ntrojan://...\nss://...") }
+                    placeholder = { Text("vless://...\nvmess://...\ntrojan://...\nss://...", color = Color.Gray) }
                 )
             }
         },
