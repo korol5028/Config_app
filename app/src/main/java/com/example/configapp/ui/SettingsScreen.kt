@@ -52,15 +52,14 @@ fun SettingsScreen(theme: AppTheme, onThemeChange: (AppTheme) -> Unit) {
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 
-                // Кружочки с цветами
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
-                    ThemeColorButton(GreenTheme, theme, onThemeChange)
-                    ThemeColorButton(DarkBlueTheme, theme, onThemeChange)
-                    ThemeColorButton(WhiteTheme, theme, onThemeChange)
-                    ThemeColorButton(BlackTheme, theme, onThemeChange)
+                    ThemeColorButton(GreenTheme, theme, Color(0xFFA3E635), onThemeChange)
+                    ThemeColorButton(DarkBlueTheme, theme, Color(0xFF3B82F6), onThemeChange)
+                    ThemeColorButton(WhiteTheme, theme, Color(0xFFF3F4F6), onThemeChange)
+                    ThemeColorButton(BlackTheme, theme, Color(0xFF111111), onThemeChange)
                 }
             }
         }
@@ -70,9 +69,8 @@ fun SettingsScreen(theme: AppTheme, onThemeChange: (AppTheme) -> Unit) {
         // Группа 2: Соединение
         SettingsGroupTitle("Соединение", theme)
         SettingsCard(theme) {
+            // Оставили только автоподключение, Kill Switch убрали
             SettingsRowItem(Icons.Default.FlashOn, theme.selectedCardBg, "Автоподключение", "Подключаться при запуске", theme)
-            HorizontalDivider(color = theme.bg)
-            SettingsRowItem(Icons.Default.Security, Color(0xFF3A1E1E), "Kill Switch", "Блокировать интернет без VPN", theme)
         }
 
         Spacer(modifier = Modifier.height(100.dp))
@@ -80,19 +78,24 @@ fun SettingsScreen(theme: AppTheme, onThemeChange: (AppTheme) -> Unit) {
 }
 
 @Composable
-fun ThemeColorButton(targetTheme: AppTheme, currentTheme: AppTheme, onThemeChange: (AppTheme) -> Unit) {
+fun ThemeColorButton(targetTheme: AppTheme, currentTheme: AppTheme, circleColor: Color, onThemeChange: (AppTheme) -> Unit) {
     val isSelected = targetTheme.name == currentTheme.name
+    
     Box(
         modifier = Modifier
             .size(48.dp)
             .clip(CircleShape)
-            .background(targetTheme.accent)
-            .border(if (isSelected) 3.dp else 0.dp, currentTheme.text, CircleShape)
+            .background(circleColor)
+            .border(2.dp, if (isSelected) currentTheme.accent else Color(0xFF555555), CircleShape)
             .clickable { onThemeChange(targetTheme) },
         contentAlignment = Alignment.Center
     ) {
         if (isSelected) {
-            Icon(Icons.Default.Check, contentDescription = null, tint = targetTheme.accentText)
+            Icon(
+                Icons.Default.Check, 
+                contentDescription = null, 
+                tint = if (circleColor == Color(0xFF111111)) Color.White else Color.Black
+            )
         }
     }
 }
