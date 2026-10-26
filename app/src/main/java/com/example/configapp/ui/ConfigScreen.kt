@@ -40,8 +40,8 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(verticalAlignment = Alignment.Bottom) {
-                // ВОТ ЗДЕСЬ НАЗВАНИЕ
-                Text("Vortexa", color = theme.accent, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                // НАЗВАНИЕ VELOX
+                Text("Velox", color = theme.accent, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("v1.0", color = theme.textGray, fontSize = 12.sp, modifier = Modifier.padding(bottom = 3.dp))
             }
