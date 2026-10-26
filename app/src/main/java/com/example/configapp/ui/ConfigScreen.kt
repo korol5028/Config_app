@@ -33,14 +33,15 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
             .background(theme.bg)
             .padding(horizontal = 16.dp)
     ) {
-        // Верхняя панель (Здесь мы убрали INCY)
+        // Верхняя панель
         Row(
             modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 24.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(verticalAlignment = Alignment.Bottom) {
-                Text("Config App", color = theme.accent, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                // ВОТ ЗДЕСЬ НАЗВАНИЕ
+                Text("Vortexa", color = theme.accent, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("v1.0", color = theme.textGray, fontSize = 12.sp, modifier = Modifier.padding(bottom = 3.dp))
             }
