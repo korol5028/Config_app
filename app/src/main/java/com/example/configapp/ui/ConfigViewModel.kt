@@ -38,15 +38,18 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
             val input = text.trim()
             
             if (input.startsWith("http://") || input.startsWith("https://")) {
-                val result = downloadAndParseSubscription(input)
-                if (result.isEmpty()) {
-                    // Если пусто, выводим первые 30 символов того, что скачалось
-                    _message.value = "Не распознано. Ответ сервера: ${result.firstOrNull() ?: "пусто"}"
+                // Получаем пару: список конфигов и текст ошибки (если есть)
+                val (downloadedItems, errorMsg) = downloadAndParseSubscription(input)
+                
+                if (errorMsg != null) {
+                    _message.value = errorMsg
+                } else if (downloadedItems.isEmpty()) {
+                    _message.value = "Не найдено валидных конфигов"
                 } else {
-                    val merged = _configs.value + result
+                    val merged = _configs.value + downloadedItems
                     _configs.value = merged
                     repo.saveAll(merged)
-                    _message.value = "Добавлено конфигов: ${result.size}"
+                    _message.value = "Добавлено конфигов: ${downloadedItems.size}"
                 }
             } else {
                 val items = parseRawText(input)
@@ -62,44 +65,42 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun downloadAndParseSubscription(url: String): List<ProxyConfig> {
+    private suspend fun downloadAndParseSubscription(url: String): Pair<List<ProxyConfig>, String?> {
         return withContext(Dispatchers.IO) {
             try {
                 val request = Request.Builder()
                     .url(url)
-                    .header("User-Agent", "v2rayNG/1.8.5") // Ставим User-Agent как у реального клиента
+                    .header("User-Agent", "v2rayNG/1.8.5")
                     .build()
                 
                 val response = httpClient.newCall(request).execute()
-                if (!response.isSuccessful) return@withContext listOf("HTTP Error: ${response.code}")
+                if (!response.isSuccessful) return@withContext Pair(emptyList<ProxyConfig>(), "HTTP Error: ${response.code}")
                 
-                var body = response.body?.string()?.trim() ?: return@withContext listOf("Пустой ответ")
+                var body = response.body?.string()?.trim() ?: return@withContext Pair(emptyList<ProxyConfig>(), "Пустой ответ")
 
-                // Если это HTML (ошибка Cloudflare)
                 if (body.startsWith("<")) {
-                    return@withContext listOf("Получен HTML: ${body.take(30)}")
+                    return@withContext Pair(emptyList<ProxyConfig>(), "Получен HTML: ${body.take(30)}")
                 }
 
-                // Пытаемся декодировать Base64 (с поддержкой URL-safe и без переносов)
                 if (!body.contains("://")) {
                     try {
                         val cleanBody = body.replace("\n", "").replace("\r", "").replace("-", "+").replace("_", "/")
                         val padded = when (cleanBody.length % 4) { 2 -> "$cleanBody=="; 3 -> "$cleanBody="; else -> cleanBody }
                         body = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
                     } catch (e: Exception) {
-                        return@withContext listOf("Ошибка Base64")
+                        return@withContext Pair(emptyList<ProxyConfig>(), "Ошибка Base64")
                     }
                 }
                 
                 val parsed = parseRawText(body)
+                
                 if (parsed.isEmpty()) {
-                    // Если не распарсили, возвращаем кусок текста для дебага
-                    listOf(body.take(30))
+                    return@withContext Pair(emptyList<ProxyConfig>(), "Не распознано. Ответ: ${body.take(30)}")
                 } else {
-                    parsed
+                    Pair(parsed, null) // Возвращаем список конфигов, ошибки нет
                 }
             } catch (e: Exception) {
-                listOf("Ошибка сети: ${e.message?.take(20)}")
+                Pair(emptyList<ProxyConfig>(), "Ошибка сети: ${e.message?.take(20)}")
             }
         }
     }
