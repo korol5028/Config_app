@@ -37,21 +37,28 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
             _message.value = "Загрузка..."
             val input = text.trim()
             
-            val items = if (input.startsWith("http://") || input.startsWith("https://")) {
-                downloadAndParseSubscription(input)
+            if (input.startsWith("http://") || input.startsWith("https://")) {
+                val result = downloadAndParseSubscription(input)
+                if (result.isEmpty()) {
+                    // Если пусто, выводим первые 30 символов того, что скачалось
+                    _message.value = "Не распознано. Ответ сервера: ${result.firstOrNull() ?: "пусто"}"
+                } else {
+                    val merged = _configs.value + result
+                    _configs.value = merged
+                    repo.saveAll(merged)
+                    _message.value = "Добавлено конфигов: ${result.size}"
+                }
             } else {
-                parseRawText(input)
+                val items = parseRawText(input)
+                if (items.isEmpty()) {
+                    _message.value = "Не найдено валидных конфигов"
+                } else {
+                    val merged = _configs.value + items
+                    _configs.value = merged
+                    repo.saveAll(merged)
+                    _message.value = "Добавлено конфигов: ${items.size}"
+                }
             }
-
-            if (items.isEmpty()) {
-                _message.value = "Не найдено валидных конфигов"
-                return@launch
-            }
-            
-            val merged = _configs.value + items
-            _configs.value = merged
-            repo.saveAll(merged)
-            _message.value = "Добавлено конфигов: ${items.size}"
         }
     }
 
@@ -60,23 +67,39 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val request = Request.Builder()
                     .url(url)
-                    .header("User-Agent", "Mozilla/5.0")
+                    .header("User-Agent", "v2rayNG/1.8.5") // Ставим User-Agent как у реального клиента
                     .build()
                 
                 val response = httpClient.newCall(request).execute()
-                if (!response.isSuccessful) return@withContext emptyList()
+                if (!response.isSuccessful) return@withContext listOf("HTTP Error: ${response.code}")
                 
-                var body = response.body?.string() ?: return@withContext emptyList()
-                body = body.trim()
+                var body = response.body?.string()?.trim() ?: return@withContext listOf("Пустой ответ")
 
+                // Если это HTML (ошибка Cloudflare)
+                if (body.startsWith("<")) {
+                    return@withContext listOf("Получен HTML: ${body.take(30)}")
+                }
+
+                // Пытаемся декодировать Base64 (с поддержкой URL-safe и без переносов)
                 if (!body.contains("://")) {
                     try {
-                        body = String(Base64.decode(body, Base64.DEFAULT), Charsets.UTF_8)
-                    } catch (e: Exception) { }
+                        val cleanBody = body.replace("\n", "").replace("\r", "").replace("-", "+").replace("_", "/")
+                        val padded = when (cleanBody.length % 4) { 2 -> "$cleanBody=="; 3 -> "$cleanBody="; else -> cleanBody }
+                        body = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
+                    } catch (e: Exception) {
+                        return@withContext listOf("Ошибка Base64")
+                    }
                 }
-                parseRawText(body)
+                
+                val parsed = parseRawText(body)
+                if (parsed.isEmpty()) {
+                    // Если не распарсили, возвращаем кусок текста для дебага
+                    listOf(body.take(30))
+                } else {
+                    parsed
+                }
             } catch (e: Exception) {
-                emptyList()
+                listOf("Ошибка сети: ${e.message?.take(20)}")
             }
         }
     }
