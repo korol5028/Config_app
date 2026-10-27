@@ -16,7 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontWeight // <-- ВОТ ОНА, РОДИМАЯ
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -50,7 +50,7 @@ fun App(
             FloatingBottomNav(selectedTab, currentTheme) { selectedTab = it }
         },
         floatingActionButton = {
-            if (selectedTab == 1) {
+            if (selectedTab == 1 || selectedTab == 0) {
                 FloatingActionButton(
                     onClick = { showImport = true },
                     containerColor = currentTheme.accent,
@@ -139,7 +139,7 @@ private fun ImportDialog(theme: AppTheme, onDismiss: () -> Unit, onImport: (Stri
         title = { Text("Импорт", color = theme.text) },
         text = {
             Column {
-                Text("Вставьте ссылку на конфиг или подписку:", color = theme.textGray)
+                Text("Вставьте конфиг (vless://...) или ссылку на подписку (https://...):", color = theme.textGray)
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = text,
