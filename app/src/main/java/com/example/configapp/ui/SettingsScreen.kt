@@ -1,5 +1,7 @@
 package com.example.configapp.ui
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,12 +19,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 @Composable
 fun SettingsScreen(theme: AppTheme, onThemeChange: (AppTheme) -> Unit) {
+    val context = LocalContext.current
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -69,8 +74,36 @@ fun SettingsScreen(theme: AppTheme, onThemeChange: (AppTheme) -> Unit) {
         // Группа 2: Соединение
         SettingsGroupTitle("Соединение", theme)
         SettingsCard(theme) {
-            // Оставили только автоподключение, Kill Switch убрали
             SettingsRowItem(Icons.Default.FlashOn, theme.selectedCardBg, "Автоподключение", "Подключаться при запуске", theme)
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Группа 3: Сообщество и ссылки
+        SettingsGroupTitle("Сообщество", theme)
+        SettingsCard(theme) {
+            // Кнопка "Мой канал" (пока заглушка)
+            SettingsLinkItem(
+                icon = Icons.Default.Send,
+                iconBg = theme.selectedCardBg,
+                title = "Мой канал",
+                subtitle = "Новости проекта и обновления",
+                url = "https://t.me/", // ЗАМЕНИ НА СВОЮ ССЫЛКУ (когда создашь канал)
+                theme = theme,
+                context = context
+            )
+            HorizontalDivider(color = theme.bg)
+            
+            // Кнопка "Наш Партнер" (ссылка друга)
+            SettingsLinkItem(
+                icon = Icons.Default.Language,
+                iconBg = theme.selectedCardBg,
+                title = "Наш Партнер", // <-- НОВОЕ НАЗВАНИЕ
+                subtitle = "Полезные материалы и конфигурации",
+                url = "https://t.me/halyava_vpnz", // ССЫЛКА ТВОЕГО ДРУГА
+                theme = theme,
+                context = context
+            )
         }
 
         Spacer(modifier = Modifier.height(100.dp))
@@ -78,9 +111,44 @@ fun SettingsScreen(theme: AppTheme, onThemeChange: (AppTheme) -> Unit) {
 }
 
 @Composable
+fun SettingsLinkItem(
+    icon: ImageVector,
+    iconBg: Color,
+    title: String,
+    subtitle: String,
+    url: String,
+    theme: AppTheme,
+    context: android.content.Context
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                try {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    // В случае ошибки ничего не делаем
+                }
+            }
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).background(iconBg), contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = null, tint = theme.accent, modifier = Modifier.size(20.dp))
+        }
+        Spacer(modifier = Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, color = theme.text, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Text(subtitle, color = theme.textGray, fontSize = 13.sp)
+        }
+        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = theme.textGray)
+    }
+}
+
+@Composable
 fun ThemeColorButton(targetTheme: AppTheme, currentTheme: AppTheme, circleColor: Color, onThemeChange: (AppTheme) -> Unit) {
     val isSelected = targetTheme.name == currentTheme.name
-    
     Box(
         modifier = Modifier
             .size(48.dp)
@@ -91,11 +159,7 @@ fun ThemeColorButton(targetTheme: AppTheme, currentTheme: AppTheme, circleColor:
         contentAlignment = Alignment.Center
     ) {
         if (isSelected) {
-            Icon(
-                Icons.Default.Check, 
-                contentDescription = null, 
-                tint = if (circleColor == Color(0xFF111111)) Color.White else Color.Black
-            )
+            Icon(Icons.Default.Check, contentDescription = null, tint = if (circleColor == Color(0xFF111111)) Color.White else Color.Black)
         }
     }
 }
