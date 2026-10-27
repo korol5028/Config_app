@@ -43,9 +43,22 @@ fun App(
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var showImport by remember { mutableStateOf(false) }
+    
+    // ДОБАВЛЕНО: Состояние для всплывающих сообщений
+    val snackbarHostState = remember { SnackbarHostState() }
+    val message by vm.message.collectAsState()
+
+    // ДОБАВЛЕНО: Показ сообщений
+    LaunchedEffect(message) {
+        message?.let {
+            snackbarHostState.showSnackbar(it)
+            vm.consumeMessage()
+        }
+    }
 
     Scaffold(
         containerColor = currentTheme.bg,
+        snackbarHost = { SnackbarHost(snackbarHostState) }, // ДОБАВЛЕНО СЮДА
         bottomBar = {
             FloatingBottomNav(selectedTab, currentTheme) { selectedTab = it }
         },
