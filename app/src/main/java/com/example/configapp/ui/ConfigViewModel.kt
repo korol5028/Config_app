@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import java.util.concurrent.TimeUnit
 
 class ConfigViewModel(app: Application) : AndroidViewModel(app) {
@@ -38,7 +39,6 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
             val input = text.trim()
             
             if (input.startsWith("http://") || input.startsWith("https://")) {
-                // Получаем пару: список конфигов и текст ошибки (если есть)
                 val (downloadedItems, errorMsg) = downloadAndParseSubscription(input)
                 
                 if (errorMsg != null) {
@@ -78,10 +78,43 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                 
                 var body = response.body?.string()?.trim() ?: return@withContext Pair(emptyList<ProxyConfig>(), "Пустой ответ")
 
-                if (body.startsWith("<")) {
-                    return@withContext Pair(emptyList<ProxyConfig>(), "Получен HTML: ${body.take(30)}")
+                // 1. Проверка на JSON формат
+                if (body.startsWith("[")) {
+                    try {
+                        val jsonArray = JSONArray(body)
+                        val extractedLinks = mutableListOf<String>()
+                        for (i in 0 until jsonArray.length()) {
+                            val jsonObject = jsonArray.getJSONObject(i)
+                            // Ищем поле с ссылкой (url, link, config)
+                            if (jsonObject.has("url")) extractedLinks.add(jsonObject.getString("url"))
+                            else if (jsonObject.has("link")) extractedLinks.add(jsonObject.getString("link"))
+                            else if (jsonObject.has("config")) extractedLinks.add(jsonObject.getString("config"))
+                            else {
+                                // Если ключи другие, пробегаемся по всем строкам и ищем "://"
+                                val keys = jsonObject.keys()
+                                while (keys.hasNext()) {
+                                    val key = keys.next()
+                                    val value = jsonObject.optString(key)
+                                    if (value.contains("://")) {
+                                        extractedLinks.add(value)
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                        val parsedFromJson = parseRawText(extractedLinks.joinToString("\n"))
+                        if (parsedFromJson.isNotEmpty()) return@withContext Pair(parsedFromJson, null)
+                    } catch (e: Exception) {
+                        // Если JSON битый, идем дальше
+                    }
                 }
 
+                // 2. Проверка на HTML
+                if (body.startsWith("<")) {
+                    return@withContext Pair(emptyList<ProxyConfig>(), "Получен HTML")
+                }
+
+                // 3. Base64
                 if (!body.contains("://")) {
                     try {
                         val cleanBody = body.replace("\n", "").replace("\r", "").replace("-", "+").replace("_", "/")
@@ -92,12 +125,12 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 
+                // 4. Обычный текст
                 val parsed = parseRawText(body)
-                
                 if (parsed.isEmpty()) {
                     return@withContext Pair(emptyList<ProxyConfig>(), "Не распознано. Ответ: ${body.take(30)}")
                 } else {
-                    Pair(parsed, null) // Возвращаем список конфигов, ошибки нет
+                    Pair(parsed, null)
                 }
             } catch (e: Exception) {
                 Pair(emptyList<ProxyConfig>(), "Ошибка сети: ${e.message?.take(20)}")
