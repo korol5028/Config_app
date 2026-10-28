@@ -10,7 +10,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        maven { url = uri("https://jitpack.io") } // <--- Вот эта строчка нужна для Xray
     }
 }
 rootProject.name = "ConfigApp"
