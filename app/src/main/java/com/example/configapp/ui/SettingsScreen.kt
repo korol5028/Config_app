@@ -1,5 +1,7 @@
 package com.example.configapp.ui
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,12 +19,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 @Composable
 fun SettingsScreen(theme: AppTheme, onThemeChange: (AppTheme) -> Unit, viewModel: ConfigViewModel) {
+    val context = LocalContext.current
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -52,7 +57,6 @@ fun SettingsScreen(theme: AppTheme, onThemeChange: (AppTheme) -> Unit, viewModel
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 
-                // Кружочки с цветами
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly
@@ -68,16 +72,46 @@ fun SettingsScreen(theme: AppTheme, onThemeChange: (AppTheme) -> Unit, viewModel
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // НОВЫЙ БЛОК: Поддержка и Telegram
+        SettingsGroupTitle("Помощь", theme)
+        SettingsCard(theme) {
+            SettingsRowItem(
+                icon = Icons.Default.Send, // Иконка Telegram (самолетик)
+                iconBg = Color(0xFF1E3A8A), // Синий фон под иконку
+                title = "Telegram-канал",
+                subtitle = "Новости и обновления Velox",
+                theme = theme,
+                onClick = {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/твой_канал"))
+                    context.startActivity(intent)
+                }
+            )
+            HorizontalDivider(color = theme.bg)
+            SettingsRowItem(
+                icon = Icons.Default.SupportAgent,
+                iconBg = Color(0xFF3A1E1E),
+                title = "Поддержка",
+                subtitle = "Написать в поддержку / Купить подписку",
+                theme = theme,
+                onClick = {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/твой_бот_поддержки"))
+                    context.startActivity(intent)
+                }
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // Данные (Очистка)
         SettingsGroupTitle("Данные", theme)
         SettingsCard(theme) {
             SettingsRowItem(
                 icon = Icons.Default.Delete,
-                iconBg = Color(0xFF3A1E1E), // Темно-красный фон для иконки удаления
+                iconBg = Color(0xFF3A1E1E),
                 title = "Очистить все сервера",
                 subtitle = "Удалить все добавленные конфиги",
                 theme = theme,
-                onClick = { viewModel.clearAll() } // Вызов функции очистки
+                onClick = { viewModel.clearAll() }
             )
         }
 
@@ -126,12 +160,13 @@ fun SettingsRowItem(icon: ImageVector, iconBg: Color, title: String, subtitle: S
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).background(iconBg), contentAlignment = Alignment.Center) {
-            Icon(icon, contentDescription = null, tint = theme.accent, modifier = Modifier.size(20.dp))
+            Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
         }
         Spacer(modifier = Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(title, color = theme.text, fontSize = 16.sp, fontWeight = FontWeight.Medium)
             Text(subtitle, color = theme.textGray, fontSize = 13.sp)
         }
+        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = theme.textGray)
     }
 }
