@@ -1,5 +1,9 @@
 package com.example.configapp.ui
 
+import android.content.Intent
+import android.net.VpnService
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -15,10 +19,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import com.example.configapp.VeloxVpnService
 import com.example.configapp.data.ProxyConfig
 
 @Composable
@@ -26,6 +33,21 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
     val configs by viewModel.configs.collectAsState()
     var isConnected by remember { mutableStateOf(false) }
     var isExpanded by remember { mutableStateOf(true) }
+    val context = LocalContext.current
+
+    // Лаунчер для запроса разрешения на VPN
+    val vpnPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            // Пользователь разрешил VPN, запускаем сервис
+            startVpnService(context, configs.firstOrNull()?.rawLink ?: "dummy_config")
+            isConnected = true
+        } else {
+            // Пользователь отказал
+            isConnected = false
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -40,7 +62,6 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(verticalAlignment = Alignment.Bottom) {
-                // НАЗВАНИЕ VELOX
                 Text("Velox", color = theme.accent, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("v1.0", color = theme.textGray, fontSize = 12.sp, modifier = Modifier.padding(bottom = 3.dp))
@@ -65,7 +86,24 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
                     .padding(8.dp)
                     .clip(CircleShape)
                     .background(theme.cardBg)
-                    .clickable { isConnected = !isConnected },
+                    .clickable {
+                        if (isConnected) {
+                            // Выключаем VPN
+                            val intent = Intent(context, VeloxVpnService::class.java).apply { action = "STOP" }
+                            context.startService(intent)
+                            isConnected = false
+                        } else {
+                            // Включаем VPN (сначала проверяем разрешение)
+                            val prepareIntent = VpnService.prepare(context)
+                            if (prepareIntent != null) {
+                                vpnPermissionLauncher.launch(prepareIntent)
+                            } else {
+                                // Разрешение уже есть
+                                startVpnService(context, configs.firstOrNull()?.rawLink ?: "dummy_config")
+                                isConnected = true
+                            }
+                        }
+                    },
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
@@ -133,6 +171,14 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
             }
         }
     }
+}
+
+// Вспомогательная функция для запуска сервиса
+fun startVpnService(context: android.content.Context, configLink: String) {
+    val intent = Intent(context, VeloxVpnService::class.java).apply {
+        putExtra("CONFIG_JSON", configLink) // Пока передаем ссылку как заглушку
+    }
+    ContextCompat.startForegroundService(context, intent)
 }
 
 @Composable
