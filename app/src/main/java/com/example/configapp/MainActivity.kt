@@ -26,7 +26,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            var currentTheme by remember { mutableStateOf(GreenTheme) }
+            var currentTheme by remember { mutableStateOf(HiddifyTheme) }
 
             MaterialTheme(colorScheme = darkColorScheme(background = currentTheme.bg)) {
                 App(currentTheme = currentTheme, onThemeChange = { currentTheme = it })
@@ -43,6 +43,7 @@ fun App(
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var showImport by remember { mutableStateOf(false) }
+    var importText by remember { mutableStateOf("") } // Для кнопки "Вставить"
 
     Scaffold(
         containerColor = currentTheme.bg,
@@ -50,23 +51,21 @@ fun App(
             FloatingBottomNav(selectedTab, currentTheme) { selectedTab = it }
         },
         floatingActionButton = {
-            // Кнопка "+" теперь на вкладке "Главная" (0)
-            if (selectedTab == 0) { 
-                FloatingActionButton(
-                    onClick = { showImport = true },
-                    containerColor = currentTheme.accent,
-                    contentColor = currentTheme.accentText
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = "Add")
-                }
-            }
+            // Убираем FAB, так как кнопки добавления теперь на экранах
         }
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
             when (selectedTab) {
                 0 -> ConfigScreen(viewModel = vm, theme = currentTheme)
-                1 -> ServersListScreen(currentTheme)
-                2 -> SettingsScreen(theme = currentTheme, onThemeChange = onThemeChange)
+                1 -> ServersScreen(
+                    viewModel = vm, 
+                    theme = currentTheme, 
+                    onAddClick = { text -> 
+                        importText = text
+                        showImport = true 
+                    }
+                )
+                2 -> SettingsScreen(theme = currentTheme, onThemeChange = onThemeChange, viewModel = vm)
             }
         }
     }
@@ -74,19 +73,13 @@ fun App(
     if (showImport) {
         ImportDialog(
             theme = currentTheme,
+            initialText = importText,
             onDismiss = { showImport = false },
             onImport = { text ->
                 vm.importFromText(text)
                 showImport = false
             }
         )
-    }
-}
-
-@Composable
-fun ServersListScreen(theme: AppTheme) {
-    Box(Modifier.fillMaxSize().background(theme.bg), contentAlignment = Alignment.Center) {
-        Text("Полный список серверов в разработке", color = theme.textGray)
     }
 }
 
@@ -132,8 +125,8 @@ fun RowScope.NavItem(title: String, icon: ImageVector, index: Int, selectedTab: 
 }
 
 @Composable
-private fun ImportDialog(theme: AppTheme, onDismiss: () -> Unit, onImport: (String) -> Unit) {
-    var text by remember { mutableStateOf("") }
+private fun ImportDialog(theme: AppTheme, initialText: String, onDismiss: () -> Unit, onImport: (String) -> Unit) {
+    var text by remember { mutableStateOf(initialText) }
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = theme.cardBg,
