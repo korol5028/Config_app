@@ -50,7 +50,8 @@ fun App(
             FloatingBottomNav(selectedTab, currentTheme) { selectedTab = it }
         },
         floatingActionButton = {
-            if (selectedTab == 1) {
+            // Кнопка "+" теперь на вкладке "Главная" (0)
+            if (selectedTab == 0) { 
                 FloatingActionButton(
                     onClick = { showImport = true },
                     containerColor = currentTheme.accent,
