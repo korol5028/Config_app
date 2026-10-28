@@ -30,7 +30,7 @@ import com.example.configapp.data.ProxyConfig
 fun ServersScreen(
     viewModel: ConfigViewModel,
     theme: AppTheme,
-    onAddClick: (String) -> Unit // Передает текст в окно импорта
+    onAddClick: (String) -> Unit
 ) {
     val configs by viewModel.configs.collectAsState()
     var searchQuery by remember { mutableStateOf("") }
@@ -39,21 +39,15 @@ fun ServersScreen(
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
 
-    // Логика фильтрации
     val filteredConfigs = configs.filter { config ->
-        val matchesSearch = config.name.contains(searchQuery, ignoreCase = true) || 
-                            config.host.contains(searchQuery, ignoreCase = true)
+        val matchesSearch = config.name.contains(searchQuery, ignoreCase = true) || config.host.contains(searchQuery, ignoreCase = true)
         val matchesProtocol = selectedProtocol == null || config.protocol == selectedProtocol
         matchesSearch && matchesProtocol
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(theme.bg)
-            .padding(horizontal = 16.dp)
+        modifier = Modifier.fillMaxSize().background(theme.bg).padding(horizontal = 16.dp)
     ) {
-        // Шапка
         Row(
             modifier = Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -67,127 +61,57 @@ fun ServersScreen(
                 IconButton(onClick = { Toast.makeText(context, "Синхронизация...", Toast.LENGTH_SHORT).show() }, modifier = Modifier.background(theme.cardBg, CircleShape)) {
                     Icon(Icons.Default.Refresh, contentDescription = "Обновить", tint = theme.accent)
                 }
-                IconButton(onClick = { Toast.makeText(context, "Замер пинга в разработке", Toast.LENGTH_SHORT).show() }, modifier = Modifier.background(theme.cardBg, CircleShape)) {
-                    Icon(Icons.Default.Speed, contentDescription = "Пинг", tint = theme.accent)
-                }
             }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Строка поиска
         TextField(
             value = searchQuery,
             onValueChange = { searchQuery = it },
             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)),
             placeholder = { Text("Поиск по названию или IP...", color = theme.textGray) },
             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = theme.textGray) },
-            trailingIcon = {
-                if (searchQuery.isNotEmpty()) {
-                    IconButton(onClick = { searchQuery = "" }) {
-                        Icon(Icons.Default.Close, contentDescription = "Очистить", tint = theme.textGray)
-                    }
-                }
-            },
             colors = TextFieldDefaults.colors(
-                focusedContainerColor = theme.cardBg,
-                unfocusedContainerColor = theme.cardBg,
-                disabledContainerColor = theme.cardBg,
-                focusedIndicatorColor = Color.Transparent,
-                unfocusedIndicatorColor = Color.Transparent,
-                focusedTextColor = theme.text,
-                unfocusedTextColor = theme.text
+                focusedContainerColor = theme.cardBg, unfocusedContainerColor = theme.cardBg, disabledContainerColor = theme.cardBg,
+                focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
+                focusedTextColor = theme.text, unfocusedTextColor = theme.text
             ),
             singleLine = true
         )
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Фильтры
         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             item {
-                FilterChip(
-                    selected = selectedProtocol == null,
-                    onClick = { selectedProtocol = null },
-                    label = { Text("Все") },
-                    shape = RoundedCornerShape(10.dp),
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = theme.accent,
-                        selectedLabelColor = theme.accentText,
-                        containerColor = theme.cardBg,
-                        labelColor = theme.textGray
-                    ),
-                    border = null
-                )
+                FilterChip(selected = selectedProtocol == null, onClick = { selectedProtocol = null }, label = { Text("Все") }, shape = RoundedCornerShape(10.dp), colors = FilterChipDefaults.filterChipColors(selectedContainerColor = theme.accent, selectedLabelColor = theme.accentText, containerColor = theme.cardBg, labelColor = theme.textGray))
             }
             items(Protocol.values()) { protocol ->
-                FilterChip(
-                    selected = selectedProtocol == protocol,
-                    onClick = { selectedProtocol = protocol },
-                    label = { Text(protocol.name) },
-                    shape = RoundedCornerShape(10.dp),
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = theme.accent,
-                        selectedLabelColor = theme.accentText,
-                        containerColor = theme.cardBg,
-                        labelColor = theme.textGray
-                    ),
-                    border = null
-                )
+                FilterChip(selected = selectedProtocol == protocol, onClick = { selectedProtocol = protocol }, label = { Text(protocol.name) }, shape = RoundedCornerShape(10.dp), colors = FilterChipDefaults.filterChipColors(selectedContainerColor = theme.accent, selectedLabelColor = theme.accentText, containerColor = theme.cardBg, labelColor = theme.textGray))
             }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Кнопки действий
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Button(
-                onClick = { onAddClick("") },
-                modifier = Modifier.weight(1f).height(48.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = theme.selectedCardBg, contentColor = theme.accent)
-            ) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(onClick = { onAddClick("") }, modifier = Modifier.weight(1f).height(48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = theme.selectedCardBg, contentColor = theme.accent)) {
                 Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Импорт", fontWeight = FontWeight.Bold)
             }
-            
-            Button(
-                onClick = {
-                    val clipboardText = clipboardManager.getText()?.text
-                    if (!clipboardText.isNullOrBlank()) {
-                        onAddClick(clipboardText)
-                    } else {
-                        Toast.makeText(context, "Буфер обмена пуст", Toast.LENGTH_SHORT).show()
-                    }
-                },
-                modifier = Modifier.weight(1f).height(48.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = theme.cardBg, contentColor = theme.text)
-            ) {
+            Button(onClick = {
+                val clipboardText = clipboardManager.getText()?.text
+                if (!clipboardText.isNullOrBlank()) onAddClick(clipboardText)
+                else Toast.makeText(context, "Буфер обмена пуст", Toast.LENGTH_SHORT).show()
+            }, modifier = Modifier.weight(1f).height(48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = theme.cardBg, contentColor = theme.text)) {
                 Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Вставить", fontWeight = FontWeight.Bold)
-            }
-            
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(theme.cardBg)
-                    .clickable { Toast.makeText(context, "QR-сканер в следующем обновлении", Toast.LENGTH_SHORT).show() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.QrCodeScanner, contentDescription = "QR", tint = theme.accent)
             }
         }
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // Список серверов
         if (filteredConfigs.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -197,19 +121,28 @@ fun ServersScreen(
                 }
             }
         } else {
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(bottom = 100.dp)
-            ) {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 100.dp)) {
                 items(filteredConfigs) { config ->
-                    ServerCard(
-                        cfg = config,
-                        isSelected = false,
-                        theme = theme,
-                        onClick = { /* Логика выбора сервера */ }
-                    )
+                    SimpleServerCard(config, theme) // Вызываем простую карточку
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun SimpleServerCard(cfg: ProxyConfig, theme: AppTheme) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(theme.cardBg).padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(modifier = Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)).background(theme.selectedCardBg), contentAlignment = Alignment.Center) {
+            Text("🌐", fontSize = 16.sp)
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(cfg.name, color = theme.text, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+            Text("${cfg.protocol.name} · ${cfg.host}", color = theme.textGray, fontSize = 12.sp)
         }
     }
 }
