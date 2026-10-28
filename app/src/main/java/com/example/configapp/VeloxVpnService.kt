@@ -32,7 +32,12 @@ class VeloxVpnService : VpnService() {
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
         
         CoroutineScope(Dispatchers.IO).launch {
-            startVpn(configLink)
+            try {
+                startVpn(configLink)
+            } catch (e: Exception) {
+                Log.e("VeloxVPN", "Crash prevented: ${e.message}")
+                stopVpn()
+            }
         }
         return START_STICKY
     }
@@ -48,6 +53,7 @@ class VeloxVpnService : VpnService() {
             return
         }
 
+        // Создаем TUN
         val builder = Builder()
             .setSession("Velox VPN")
             .addAddress("10.0.0.2", 32)
@@ -64,22 +70,12 @@ class VeloxVpnService : VpnService() {
             return
         }
 
+        // Запускаем Xray
         try {
             val callback = object : CoreCallbackHandler {
-                override fun startup(): Long {
-                    Log.d("VeloxVPN", "Core started")
-                    return 0
-                }
-
-                override fun shutdown(): Long {
-                    Log.d("VeloxVPN", "Core stopped")
-                    return 0
-                }
-
-                override fun onEmitStatus(l: Long, s: String?): Long {
-                    Log.d("VeloxVPN", "Core status: $s")
-                    return 0
-                }
+                override fun startup(): Long { return 0 }
+                override fun shutdown(): Long { return 0 }
+                override fun onEmitStatus(l: Long, s: String?): Long { return 0 }
             }
             
             coreController = Libv2ray.newCoreController(callback)
@@ -94,7 +90,7 @@ class VeloxVpnService : VpnService() {
         }
     }
 
-    // ИСПРАВЛЕННЫЙ ПАРСЕР (Добавили fingerprint и spiderX)
+    // ИСПРАВЛЕННЫЙ ПАРСЕР: Поддерживает REALITY и обычный TLS
     private fun buildXrayConfig(link: String): String? {
         try {
             if (!link.startsWith("vless://")) return null
@@ -103,13 +99,49 @@ class VeloxVpnService : VpnService() {
             val host = uri.host ?: return null
             val port = if (uri.port != -1) uri.port else 443
             
-            val sni = uri.getQueryParameter("sni") ?: host
+            val security = uri.getQueryParameter("security") ?: "none"
+            val sni = uri.getQueryParameter("sni") ?: uri.getQueryParameter("host") ?: host
             val pbk = uri.getQueryParameter("pbk") ?: ""
             val sid = uri.getQueryParameter("sid") ?: ""
             val flow = uri.getQueryParameter("flow") ?: ""
-            // ДОБАВЛЕНО: Отпечаток браузера (по умолчанию chrome)
             val fp = uri.getQueryParameter("fp") ?: "chrome" 
-            val spx = uri.getQueryParameter("spx") ?: "/"
+            val type = uri.getQueryParameter("type") ?: "tcp"
+            val path = uri.getQueryParameter("path") ?: "/"
+            val hostHeader = uri.getQueryParameter("host") ?: ""
+
+            // Формируем блок безопасности в зависимости от протокола
+            val streamSettings = if (security == "reality") {
+                """
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                  "serverName": "$sni",
+                  "publicKey": "$pbk",
+                  "shortId": "$sid",
+                  "fingerprint": "$fp",
+                  "spiderX": "/"
+                }
+                """.trimIndent()
+            } else if (security == "tls") {
+                """
+                "network": "$type",
+                "security": "tls",
+                "tlsSettings": {
+                  "serverName": "$sni",
+                  "allowInsecure": false
+                },
+                ${if (type == "ws") "\"wsSettings\": { \"path\": \"$path\", \"headers\": { \"Host\": \"$hostHeader\" } }," else ""}
+                """.trimIndent()
+            } else {
+                """
+                "network": "$type",
+                "security": "none",
+                ${if (type == "ws") "\"wsSettings\": { \"path\": \"$path\", \"headers\": { \"Host\": \"$hostHeader\" } }," else ""}
+                """.trimIndent()
+            }
+
+            // Убираем лишние запятые в конце блока
+            val safeStreamSettings = streamSettings.trimEnd(',')
 
             return """
                 {
@@ -135,15 +167,7 @@ class VeloxVpnService : VpnService() {
                         ]
                       },
                       "streamSettings": {
-                        "network": "tcp",
-                        "security": "reality",
-                        "realitySettings": {
-                          "serverName": "$sni",
-                          "publicKey": "$pbk",
-                          "shortId": "$sid",
-                          "fingerprint": "$fp",
-                          "spiderX": "$spx"
-                        }
+                        $safeStreamSettings
                       }
                     }
                   ]
@@ -156,16 +180,10 @@ class VeloxVpnService : VpnService() {
     }
 
     private fun stopVpn() {
-        try {
-            coreController?.stopLoop()
-        } catch (e: Exception) {
-            Log.e("VeloxVPN", "Error stopping core", e)
-        }
+        try { coreController?.stopLoop() } catch (e: Exception) {}
         coreController = null
-        
         vpnInterface?.close()
         vpnInterface = null
-        
         isRunning = false
         stopForeground(true)
         stopSelf()
