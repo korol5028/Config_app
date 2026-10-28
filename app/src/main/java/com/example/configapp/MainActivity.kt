@@ -43,15 +43,12 @@ fun App(
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var showImport by remember { mutableStateOf(false) }
-    var importText by remember { mutableStateOf("") } // Для кнопки "Вставить"
+    var importText by remember { mutableStateOf("") }
 
     Scaffold(
         containerColor = currentTheme.bg,
         bottomBar = {
             FloatingBottomNav(selectedTab, currentTheme) { selectedTab = it }
-        },
-        floatingActionButton = {
-            // Убираем FAB, так как кнопки добавления теперь на экранах
         }
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
@@ -65,6 +62,7 @@ fun App(
                         showImport = true 
                     }
                 )
+                // ВОТ ЗДЕСЬ ДОБАВЛЕН viewModel
                 2 -> SettingsScreen(theme = currentTheme, onThemeChange = onThemeChange, viewModel = vm)
             }
         }
