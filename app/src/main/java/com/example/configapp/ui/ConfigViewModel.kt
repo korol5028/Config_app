@@ -15,12 +15,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-// Модель для хранения инфы о подписке
 data class SubInfo(
     val title: String = "Моя подписка",
     val expire: String = "Неизвестно",
@@ -35,9 +36,15 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
-    // Данные текущей подписки для UI
     private val _subInfo = MutableStateFlow<SubInfo?>(null)
     val subInfo: StateFlow<SubInfo?> = _subInfo.asStateFlow()
+
+    // Для пинга
+    private val _pingResults = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val pingResults: StateFlow<Map<String, Int>> = _pingResults.asStateFlow()
+
+    private val _isPinging = MutableStateFlow(false)
+    val isPinging: StateFlow<Boolean> = _isPinging.asStateFlow()
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -46,28 +53,47 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
 
     init { viewModelScope.launch { _configs.value = repo.loadAll() } }
 
+    fun pingAllServers() {
+        if (_isPinging.value) return
+        viewModelScope.launch {
+            _isPinging.value = true
+            val results = mutableMapOf<String, Int>()
+            
+            withContext(Dispatchers.IO) {
+                _configs.value.forEach { config ->
+                    val start = System.currentTimeMillis()
+                    try {
+                        val socket = Socket()
+                        socket.connect(InetSocketAddress(config.host, config.port), 2000)
+                        socket.close()
+                        results[config.id] = (System.currentTimeMillis() - start).toInt()
+                    } catch (e: Exception) {
+                        results[config.id] = -1 // -1 значит мертв
+                    }
+                }
+            }
+            _pingResults.value = results
+            _isPinging.value = false
+        }
+    }
+
     fun importFromText(text: String) {
         viewModelScope.launch {
             _message.value = "Загрузка..."
             val input = text.trim()
             
             if (input.startsWith("http://") || input.startsWith("https://")) {
-                // Это подписка
                 val result = downloadAndParseSubscription(input)
                 if (result.first.isEmpty()) {
                     _message.value = result.second
                     return@launch
                 }
-                
-                // Обновляем инфу о подписке
                 _subInfo.value = result.third
-                
                 val merged = _configs.value + result.first
                 _configs.value = merged
                 repo.saveAll(merged)
                 _message.value = "Добавлено серверов: ${result.first.size}"
             } else {
-                // Обычный текст
                 val items = parseRawText(input)
                 if (items.isEmpty()) {
                     _message.value = "Не найдено валидных конфигов"
@@ -84,15 +110,10 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun downloadAndParseSubscription(url: String): Triple<List<ProxyConfig>, String, SubInfo?> {
         return withContext(Dispatchers.IO) {
             try {
-                val request = Request.Builder()
-                    .url(url)
-                    .header("User-Agent", "v2rayNG/1.8.5")
-                    .build()
-                
+                val request = Request.Builder().url(url).header("User-Agent", "v2rayNG/1.8.5").build()
                 val response = httpClient.newCall(request).execute()
                 if (!response.isSuccessful) return@withContext Triple(emptyList(), "Ошибка сети: ${response.code}", null)
                 
-                // Читаем заголовки подписки
                 val title = response.header("profile-title") ?: "Подписка"
                 val userInfoStr = response.header("subscription-userinfo")
                 
@@ -100,58 +121,40 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                 var trafficStr = "0 / 0 ГБ"
                 
                 if (userInfoStr != null) {
-                    // Формат: upload=123; download=456; total=789; expire=1700000000
                     val parts = userInfoStr.split(";").map { it.trim() }
-                    var download = 0L
-                    var total = 0L
-                    var expireTime = 0L
-                    
+                    var download = 0L; var total = 0L; var expireTime = 0L
                     for (part in parts) {
                         if (part.startsWith("download=")) download = part.substringAfter("=").toLongOrNull() ?: 0
                         if (part.startsWith("total=")) total = part.substringAfter("=").toLongOrNull() ?: 0
                         if (part.startsWith("expire=")) expireTime = part.substringAfter("=").toLongOrNull() ?: 0
                     }
-                    
                     if (expireTime > 0) {
                         val date = Date(expireTime * 1000)
                         expireStr = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault()).format(date)
                     }
-                    
-                    if (total > 0) {
-                        trafficStr = "${formatBytes(download)} / ${formatBytes(total)}"
-                    }
+                    if (total > 0) trafficStr = "${formatBytes(download)} / ${formatBytes(total)}"
                 }
 
                 val subInfo = SubInfo(title, expireStr, trafficStr)
-
                 var body: String? = response.body?.string()
                 if (body.isNullOrBlank()) return@withContext Triple(emptyList(), "Пустой ответ", null)
-                
                 var safeBody: String = body!!.trim()
 
-                // Декодируем Base64, если нужно
                 if (!safeBody.contains("://")) {
                     try {
                         val cleanBase64 = safeBody.replace('-', '+').replace('_', '/').replace("\n", "").replace("\r", "")
-                        val padded = when (cleanBase64.length % 4) {
-                            2 -> "$cleanBase64=="
-                            3 -> "$cleanBase64="
-                            else -> cleanBase64
-                        }
+                        val padded = when (cleanBase64.length % 4) { 2 -> "$cleanBase64=="; 3 -> "$cleanBase64="; else -> cleanBase64 }
                         val decoded = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
                         if (decoded.contains("://")) safeBody = decoded
                     } catch (e: Exception) {}
                 }
-                
                 Triple(parseRawText(safeBody), "OK", subInfo)
             } catch (e: Exception) {
-                e.printStackTrace()
                 Triple(emptyList(), "Ошибка загрузки", null)
             }
         }
     }
 
-    // Функция для красивого отображения байтов
     private fun formatBytes(bytes: Long): String {
         if (bytes <= 0) return "0 B"
         val units = arrayOf("B", "KB", "MB", "GB", "TB")
@@ -173,6 +176,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
         _configs.value = emptyList()
         repo.saveAll(emptyList())
         _subInfo.value = null
+        _pingResults.value = emptyMap()
         _message.value = "Все сервера удалены"
     }
 
