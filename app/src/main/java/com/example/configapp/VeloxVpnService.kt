@@ -15,7 +15,8 @@ import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
 
-class VeloxVpnService : VpnService() {
+// ВАЖНО: Мы реализуем CoreCallbackHandler прямо в нашем VpnService!
+class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var isRunning = false
     private var coreController: CoreController? = null
@@ -28,18 +29,16 @@ class VeloxVpnService : VpnService() {
 
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
         
-        // 1. СРАЗУ ПОКАЗЫВАЕМ УВЕДОМЛЕНИЕ (Чтобы Android не убил сервис)
         try {
             startForeground(1, createNotification())
         } catch (e: Exception) {
             Log.e("VeloxVPN", "Failed to start foreground: ${e.message}")
         }
 
-        // 2. Запускаем VPN в фоне
         Thread {
             try {
                 startVpn(configLink)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.e("VeloxVPN", "Crash prevented: ${e.message}")
                 stopVpn()
             }
@@ -59,7 +58,6 @@ class VeloxVpnService : VpnService() {
             return
         }
 
-        // Создаем TUN (в try-catch на случай отказа системы)
         try {
             val builder = Builder()
                 .setSession("Velox VPN")
@@ -73,30 +71,41 @@ class VeloxVpnService : VpnService() {
             vpnInterface = builder.establish()
             val fd = vpnInterface?.fd
             
-            if (fd == null) {
-                Log.e("VeloxVPN", "Failed to establish TUN (fd is null)")
+            if (fd == null || fd == -1) {
+                Log.e("VeloxVPN", "Failed to establish TUN (fd is invalid)")
                 stopVpn()
                 return
             }
 
-            // Запускаем Xray
-            val callback = object : CoreCallbackHandler {
-                override fun startup(): Long { return 0 }
-                override fun shutdown(): Long { return 0 }
-                override fun onEmitStatus(l: Long, s: String?): Long { return 0 }
-            }
-            
-            coreController = Libv2ray.newCoreController(callback)
+            // ГЛАВНЫЙ ФИКС: Передаем `this` (наш VpnService), чтобы libv2ray могла вызывать protect()
+            coreController = Libv2ray.newCoreController(this)
             coreController?.startLoop(xrayJsonConfig, fd)
             
             Log.d("VeloxVPN", "Xray started successfully!")
             
-        } catch (e: Exception) {
-            Log.e("VeloxVPN", "Error starting core or TUN", e)
+        } catch (e: Throwable) {
+            Log.e("VeloxVPN", "Error starting core", e)
             stopVpn()
         }
     }
 
+    // --- Реализация методов CoreCallbackHandler ---
+    override fun startup(): Long {
+        Log.d("VeloxVPN", "Core startup")
+        return 0
+    }
+
+    override fun shutdown(): Long {
+        Log.d("VeloxVPN", "Core shutdown")
+        return 0
+    }
+
+    override fun onEmitStatus(l: Long, s: String?): Long {
+        Log.d("VeloxVPN", "Core status: $s")
+        return 0
+    }
+
+    // --- Парсер конфига (JSON с DNS и Routing) ---
     private fun buildXrayConfig(link: String): String? {
         try {
             if (!link.startsWith("vless://")) return null
@@ -146,13 +155,18 @@ class VeloxVpnService : VpnService() {
             }
 
             val safeStreamSettings = streamSettings.trimEnd(',')
+            val flowParam = if (flow.isNotEmpty()) ",\"flow\": \"$flow\"" else ""
 
             return """
                 {
                   "log": { "loglevel": "warning" },
+                  "dns": {
+                    "servers": [ "1.1.1.1", "8.8.8.8" ]
+                  },
                   "inbounds": [
                     {
                       "port": 10808,
+                      "listen": "127.0.0.1",
                       "protocol": "socks",
                       "settings": { "udp": true },
                       "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
@@ -166,25 +180,32 @@ class VeloxVpnService : VpnService() {
                           {
                             "address": "$host",
                             "port": $port,
-                            "users": [ { "id": "$uuid", "encryption": "none", "flow": "$flow" } ]
+                            "users": [ { "id": "$uuid", "encryption": "none" $flowParam } ]
                           }
                         ]
                       },
                       "streamSettings": {
                         $safeStreamSettings
                       }
-                    }
-                  ]
+                    },
+                    { "protocol": "freedom", "tag": "direct" },
+                    { "protocol": "blackhole", "tag": "block" }
+                  ],
+                  "routing": {
+                    "rules": [
+                      { "type": "field", "ip": [ "geoip:private" ], "outboundTag": "direct" }
+                    ]
+                  }
                 }
             """.trimIndent()
-        } catch (e: Exception) {
-            Log.e("VeloxVPN", "Parse error", e)
+        } catch (e: Throwable) {
+            Log.e("VeloxVPN", "Parse error: ${e.message}")
             return null
         }
     }
 
     private fun stopVpn() {
-        try { coreController?.stopLoop() } catch (e: Exception) {}
+        try { coreController?.stopLoop() } catch (e: Throwable) {}
         coreController = null
         vpnInterface?.close()
         vpnInterface = null
