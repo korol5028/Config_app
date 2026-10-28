@@ -76,66 +76,78 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                 val response = httpClient.newCall(request).execute()
                 if (!response.isSuccessful) return@withContext Pair(emptyList<ProxyConfig>(), "HTTP Error: ${response.code}")
                 
-                var body = response.body?.string()?.trim() ?: return@withContext Pair(emptyList<ProxyConfig>(), "Пустой ответ")
+                val body = response.body?.string()?.trim() ?: return@withContext Pair(emptyList<ProxyConfig>(), "Пустой ответ")
 
-                // 1. Проверка на JSON формат
-                if (body.startsWith("[")) {
-                    try {
-                        val jsonArray = JSONArray(body)
-                        val extractedLinks = mutableListOf<String>()
-                        for (i in 0 until jsonArray.length()) {
-                            val jsonObject = jsonArray.getJSONObject(i)
-                            // Ищем поле с ссылкой (url, link, config)
-                            if (jsonObject.has("url")) extractedLinks.add(jsonObject.getString("url"))
-                            else if (jsonObject.has("link")) extractedLinks.add(jsonObject.getString("link"))
-                            else if (jsonObject.has("config")) extractedLinks.add(jsonObject.getString("config"))
-                            else {
-                                // Если ключи другие, пробегаемся по всем строкам и ищем "://"
-                                val keys = jsonObject.keys()
-                                while (keys.hasNext()) {
-                                    val key = keys.next()
-                                    val value = jsonObject.optString(key)
-                                    if (value.contains("://")) {
-                                        extractedLinks.add(value)
-                                        break
-                                    }
-                                }
-                            }
-                        }
-                        val parsedFromJson = parseRawText(extractedLinks.joinToString("\n"))
-                        if (parsedFromJson.isNotEmpty()) return@withContext Pair(parsedFromJson, null)
-                    } catch (e: Exception) {
-                        // Если JSON битый, идем дальше
-                    }
-                }
-
-                // 2. Проверка на HTML
-                if (body.startsWith("<")) {
-                    return@withContext Pair(emptyList<ProxyConfig>(), "Получен HTML")
-                }
-
-                // 3. Base64
-                if (!body.contains("://")) {
-                    try {
-                        val cleanBody = body.replace("\n", "").replace("\r", "").replace("-", "+").replace("_", "/")
-                        val padded = when (cleanBody.length % 4) { 2 -> "$cleanBody=="; 3 -> "$cleanBody="; else -> cleanBody }
-                        body = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
-                    } catch (e: Exception) {
-                        return@withContext Pair(emptyList<ProxyConfig>(), "Ошибка Base64")
+                // Вызываем наш супер-парсер
+                val extractedLinks = extractLinksFromText(body)
+                
+                if (extractedLinks.isNotEmpty()) {
+                    val parsed = parseRawText(extractedLinks.joinToString("\n"))
+                    if (parsed.isNotEmpty()) {
+                        return@withContext Pair(parsed, null)
                     }
                 }
                 
-                // 4. Обычный текст
-                val parsed = parseRawText(body)
-                if (parsed.isEmpty()) {
-                    return@withContext Pair(emptyList<ProxyConfig>(), "Не распознано. Ответ: ${body.take(30)}")
-                } else {
-                    Pair(parsed, null)
-                }
+                return@withContext Pair(emptyList<ProxyConfig>(), "Не распознано. Ответ: ${body.take(30)}")
+
             } catch (e: Exception) {
                 Pair(emptyList<ProxyConfig>(), "Ошибка сети: ${e.message?.take(20)}")
             }
         }
+    }
+
+    // МЕТОД, КОТОРЫЙ ВЫТАСКИВАЕТ ССЫЛКИ ИЗ ЛЮБОГО ФОРМАТА
+    private fun extractLinksFromText(text: String): List<String> {
+        val links = mutableListOf<String>()
+        // Ищем популярные протоколы
+        val regex = Regex("""(vless|vmess|trojan|ss|hysteria|hysteria2|hy2|tuic)://[^\s"']+""")
+        
+        // 1. Прямой поиск
+        links.addAll(regex.findAll(text).map { it.value })
+        
+        // 2. Поиск внутри Base64 (если весь текст закодирован)
+        if (links.isEmpty()) {
+            try {
+                val clean = text.replace("\n", "").replace("\r", "").replace("-", "+").replace("_", "/")
+                val padded = when (clean.length % 4) { 2 -> "$clean=="; 3 -> "$clean="; else -> clean }
+                val decoded = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
+                links.addAll(regex.findAll(decoded).map { it.value })
+            } catch (e: Exception) {}
+        }
+        
+        // 3. Если это JSON - заходим внутрь и проверяем каждое поле
+        if (links.isEmpty() && text.trim().startsWith("[")) {
+            try {
+                val jsonArray = JSONArray(text)
+                for (i in 0 until jsonArray.length()) {
+                    val obj = jsonArray.optJSONObject(i)
+                    if (obj != null) {
+                        val keys = obj.keys()
+                        while (keys.hasNext()) {
+                            val key = keys.next()
+                            val value = obj.optString(key)
+                            
+                            // Если значение - это прямая ссылка
+                            if (regex.containsMatchIn(value)) {
+                                links.addAll(regex.findAll(value).map { it.value })
+                            } else {
+                                // Если значение - это Base64
+                                try {
+                                    val clean = value.replace("\n", "").replace("\r", "").replace("-", "+").replace("_", "/")
+                                    val padded = when (clean.length % 4) { 2 -> "$clean=="; 3 -> "$clean="; else -> clean }
+                                    val decoded = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
+                                    if (regex.containsMatchIn(decoded)) {
+                                        links.addAll(regex.findAll(decoded).map { it.value })
+                                    }
+                                } catch (e: Exception) {}
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {}
+        }
+        
+        return links.distinct()
     }
 
     private fun parseRawText(text: String): List<ProxyConfig> {
