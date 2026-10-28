@@ -61,15 +61,14 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         try {
             val builder = Builder()
                 .setSession("Velox VPN")
-                .addAddress("172.19.0.1", 30) // Изменили IP туннеля
+                .addAddress("172.19.0.1", 30)
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
                 .setMtu(1500)
                 .setBlocking(true)
 
-            // ЖЕЛЕЗОБЕТОННЫЙ ФИКС: Исключаем наше приложение из туннеля
-            // Это гарантирует, что Xray сможет отправить данные на сервер напрямую
+            // Исключаем наше приложение из туннеля
             try {
                 builder.addDisallowedApplication(packageName)
             } catch (e: Exception) {
@@ -86,15 +85,9 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             }
 
             coreController = Libv2ray.newCoreController(this)
-            // Проверяем, запустился ли движок
-            val result = coreController?.startLoop(xrayJsonConfig, fd)
             
-            if (result != 0L) {
-                Log.e("VeloxVPN", "startLoop failed with code: $result")
-                showToast("Ошибка запуска ядра: $result")
-                stopVpn()
-                return
-            }
+            // ПРОСТО ВЫЗЫВАЕМ БЕЗ ПРОВЕРКИ ВОЗВРАЩАЕМОГО ЗНАЧЕНИЯ
+            coreController?.startLoop(xrayJsonConfig, fd)
             
             Log.d("VeloxVPN", "Xray started successfully!")
             
