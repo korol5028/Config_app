@@ -25,7 +25,6 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
-    // Увеличили таймаут, чтобы медленные сервера успевали отдать файл
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -39,18 +38,16 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
             val input = text.trim()
             
             if (input.startsWith("http://") || input.startsWith("https://")) {
-                // Это ссылка на подписку
                 val items = downloadAndParseSubscription(input)
                 if (items.isEmpty()) {
-                    _message.value = "Ошибка: Не удалось загрузить подписку (сервер блокирует или пустой ответ)"
+                    _message.value = "Ошибка: Не удалось загрузить подписку"
                     return@launch
                 }
                 val merged = _configs.value + items
                 _configs.value = merged
                 repo.saveAll(merged)
-                _message.value = "Добавлено конфигов из подписки: ${items.size}"
+                _message.value = "Добавлено из подписки: ${items.size}"
             } else {
-                // Это обычные конфиги текстом
                 val items = parseRawText(input)
                 if (items.isEmpty()) {
                     _message.value = "Не найдено валидных конфигов"
@@ -67,7 +64,6 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun downloadAndParseSubscription(url: String): List<ProxyConfig> {
         return withContext(Dispatchers.IO) {
             try {
-                // Пробуем разные User-Agent, так как некоторые панели отдают конфиг только клиентам
                 val userAgents = listOf(
                     "v2rayNG/1.8.5",
                     "Happ/1.0",
@@ -91,17 +87,16 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                 
                 if (body.isNullOrBlank()) return@withContext emptyList()
                 
-                body = body.trim()
+                // СОЗДАЕМ БЕЗОПАСНУЮ ПЕРЕМЕННУЮ (без null)
+                var safeBody: String = body!!.trim()
 
-                // Если сервер вернул страницу с ошибкой вместо конфига
-                if (body.contains("<html", ignoreCase = true)) {
+                if (safeBody.contains("<html", ignoreCase = true)) {
                     return@withContext emptyList()
                 }
 
-                // Пытаемся расшифровать Base64 (включая URL-safe формат)
-                if (!body.contains("://")) {
+                if (!safeBody.contains("://")) {
                     try {
-                        val cleanBase64 = body
+                        val cleanBase64 = safeBody
                             .replace('-', '+')
                             .replace('_', '/')
                             .replace("\n", "")
@@ -114,14 +109,15 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                         }
                         val decoded = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
                         if (decoded.contains("://")) {
-                            body = decoded
+                            safeBody = decoded
                         }
                     } catch (e: Exception) {
-                        // Если не вышло декодировать, пробуем парсить как есть
+                        // Игнорируем, если не получилось декодировать
                     }
                 }
                 
-                parseRawText(body)
+                // Передаем уже безопасную строку
+                parseRawText(safeBody) 
             } catch (e: Exception) {
                 e.printStackTrace()
                 emptyList()
@@ -132,7 +128,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
     private fun parseRawText(text: String): List<ProxyConfig> {
         return text.split('\n', '\r')
             .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith("#") } // Игнорируем комментарии
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
             .mapNotNull { ConfigParser.parse(it) }
     }
 
