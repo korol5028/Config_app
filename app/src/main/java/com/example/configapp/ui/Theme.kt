@@ -4,17 +4,16 @@ import androidx.compose.ui.graphics.Color
 
 data class AppTheme(
     val name: String,
-    val bg: Color,           // Фон приложения
-    val cardBg: Color,       // Фон карточек и меню
-    val selectedCardBg: Color, // Фон выбранного сервера
-    val accent: Color,       // Главный цвет (кнопки, текст)
-    val accentText: Color,   // Цвет текста на кнопках (черный или белый)
-    val text: Color,         // Основной текст
-    val textGray: Color,     // Второстепенный текст
-    val border: Color        // Рамки
+    val bg: Color,
+    val cardBg: Color,
+    val selectedCardBg: Color,
+    val accent: Color,
+    val accentText: Color,
+    val text: Color,
+    val textGray: Color,
+    val border: Color
 )
 
-// 1. Зеленая (как на референсе)
 val GreenTheme = AppTheme(
     name = "Зелёная",
     bg = Color(0xFF0B110D),
@@ -27,7 +26,6 @@ val GreenTheme = AppTheme(
     border = Color(0xFF2A3B31)
 )
 
-// 2. Темно-синяя
 val DarkBlueTheme = AppTheme(
     name = "Тёмно-синяя",
     bg = Color(0xFF0A0F1A),
@@ -40,7 +38,6 @@ val DarkBlueTheme = AppTheme(
     border = Color(0xFF2B3A5A)
 )
 
-// 3. Белая
 val WhiteTheme = AppTheme(
     name = "Белая",
     bg = Color(0xFFF3F4F6),
@@ -53,7 +50,6 @@ val WhiteTheme = AppTheme(
     border = Color(0xFFD1D5DB)
 )
 
-// 4. Черная
 val BlackTheme = AppTheme(
     name = "Чёрная",
     bg = Color(0xFF000000),
@@ -64,4 +60,16 @@ val BlackTheme = AppTheme(
     text = Color.White,
     textGray = Color(0xFF888888),
     border = Color(0xFF333333)
+)
+
+val HiddifyTheme = AppTheme(
+    name = "Индиго",
+    bg = Color(0xFF16123F),
+    cardBg = Color(0xFF251F5A),
+    selectedCardBg = Color(0xFF352D7A),
+    accent = Color(0xFF8B5CF6),
+    accentText = Color.White,
+    text = Color.White,
+    textGray = Color(0xFFB0A8D6),
+    border = Color(0xFF3A327A)
 )
