@@ -1,7 +1,7 @@
 package com.example.configapp.ui
 
 import android.content.Intent
-import android.net.Uri
+import android.net.VpnService
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,6 +24,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import com.example.configapp.VeloxVpnService
 import com.example.configapp.data.ProxyConfig
 
 @Composable
@@ -32,7 +34,6 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
     var isConnected by remember { mutableStateOf(false) }
     var isExpanded by remember { mutableStateOf(true) }
     
-    // Храним выбранный сервер
     var selectedConfig by remember { mutableStateOf<ProxyConfig?>(null) }
     LaunchedEffect(configs) {
         if (selectedConfig == null && configs.isNotEmpty()) {
@@ -41,6 +42,21 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
     }
 
     val context = LocalContext.current
+
+    // Запрос разрешения на VPN
+    val vpnPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            selectedConfig?.let { config ->
+                startVpnService(context, config.rawLink)
+                isConnected = true
+            }
+        } else {
+            isConnected = false
+            Toast.makeText(context, "Разрешение на VPN отклонено", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -81,24 +97,24 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
                     .background(theme.cardBg)
                     .clickable {
                         if (isConnected) {
-                            // Просто сбрасываем визуальное состояние
+                            // Выключаем VPN
+                            val intent = Intent(context, VeloxVpnService::class.java).apply { action = "STOP" }
+                            context.startService(intent)
                             isConnected = false
-                            Toast.makeText(context, "Отключено в Velox", Toast.LENGTH_SHORT).show()
                         } else {
-                            val config = selectedConfig
-                            if (config != null) {
-                                try {
-                                    // Передаем ссылку во внешнее приложение (v2rayNG / Happ)
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(config.rawLink))
-                                    context.startActivity(intent)
-                                    
-                                    isConnected = true
-                                    Toast.makeText(context, "Конфиг передан в VPN-клиент", Toast.LENGTH_SHORT).show()
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "Установите v2rayNG или Happ", Toast.LENGTH_LONG).show()
-                                }
-                            } else {
+                            // Включаем VPN
+                            if (selectedConfig == null) {
                                 Toast.makeText(context, "Сначала выберите сервер", Toast.LENGTH_SHORT).show()
+                                return@clickable
+                            }
+                            
+                            // Запрашиваем разрешение
+                            val prepareIntent = VpnService.prepare(context)
+                            if (prepareIntent != null) {
+                                vpnPermissionLauncher.launch(prepareIntent)
+                            } else {
+                                startVpnService(context, selectedConfig!!.rawLink)
+                                isConnected = true
                             }
                         }
                     },
@@ -118,7 +134,6 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
                 fontSize = 14.sp
             )
             
-            // Отображаем имя выбранного сервера под кнопкой
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = selectedConfig?.name ?: "Сервер не выбран",
@@ -184,6 +199,14 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
             }
         }
     }
+}
+
+// Запуск нашего внутреннего сервиса
+fun startVpnService(context: android.content.Context, configLink: String) {
+    val intent = Intent(context, VeloxVpnService::class.java).apply {
+        putExtra("CONFIG_JSON", configLink)
+    }
+    ContextCompat.startForegroundService(context, intent)
 }
 
 @Composable
