@@ -21,7 +21,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -33,6 +32,15 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
     val configs by viewModel.configs.collectAsState()
     var isConnected by remember { mutableStateOf(false) }
     var isExpanded by remember { mutableStateOf(true) }
+    
+    // Храним выбранный сервер. По умолчанию берем первый из списка.
+    var selectedConfig by remember { mutableStateOf<ProxyConfig?>(null) }
+    LaunchedEffect(configs) {
+        if (selectedConfig == null && configs.isNotEmpty()) {
+            selectedConfig = configs.first()
+        }
+    }
+
     val context = LocalContext.current
 
     // Лаунчер для запроса разрешения на VPN
@@ -41,10 +49,11 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
             // Пользователь разрешил VPN, запускаем сервис
-            startVpnService(context, configs.firstOrNull()?.rawLink ?: "dummy_config")
-            isConnected = true
+            selectedConfig?.let { config ->
+                startVpnService(context, config.rawLink)
+                isConnected = true
+            }
         } else {
-            // Пользователь отказал
             isConnected = false
         }
     }
@@ -93,13 +102,17 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
                             context.startService(intent)
                             isConnected = false
                         } else {
-                            // Включаем VPN (сначала проверяем разрешение)
+                            // Включаем VPN
+                            if (selectedConfig == null) {
+                                // Тут можно показать Toast "Выберите сервер"
+                                return@clickable
+                            }
+                            
                             val prepareIntent = VpnService.prepare(context)
                             if (prepareIntent != null) {
                                 vpnPermissionLauncher.launch(prepareIntent)
                             } else {
-                                // Разрешение уже есть
-                                startVpnService(context, configs.firstOrNull()?.rawLink ?: "dummy_config")
+                                startVpnService(context, selectedConfig!!.rawLink)
                                 isConnected = true
                             }
                         }
@@ -113,11 +126,21 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
                     modifier = Modifier.size(56.dp)
                 )
             }
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
             Text(
                 text = if (isConnected) "Подключено" else "Нажмите для подключения",
                 color = if (isConnected) theme.accent else theme.textGray,
                 fontSize = 14.sp
+            )
+            
+            // Отображаем имя выбранного сервера под кнопкой
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = selectedConfig?.name ?: "Сервер не выбран",
+                color = theme.text,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
             )
         }
 
@@ -164,7 +187,12 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(configs) { cfg ->
-                            ServerCard(cfg, isSelected = false, theme = theme)
+                            ServerCard(
+                                cfg = cfg,
+                                isSelected = (cfg.id == selectedConfig?.id),
+                                theme = theme,
+                                onClick = { selectedConfig = cfg }
+                            )
                         }
                     }
                 }
@@ -176,19 +204,20 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
 // Вспомогательная функция для запуска сервиса
 fun startVpnService(context: android.content.Context, configLink: String) {
     val intent = Intent(context, VeloxVpnService::class.java).apply {
-        putExtra("CONFIG_JSON", configLink) // Пока передаем ссылку как заглушку
+        putExtra("CONFIG_JSON", configLink)
     }
     ContextCompat.startForegroundService(context, intent)
 }
 
 @Composable
-fun ServerCard(cfg: ProxyConfig, isSelected: Boolean, theme: AppTheme) {
+fun ServerCard(cfg: ProxyConfig, isSelected: Boolean, theme: AppTheme, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(if (isSelected) theme.selectedCardBg else theme.cardBg)
             .border(1.dp, if (isSelected) theme.accent else theme.bg, RoundedCornerShape(12.dp))
+            .clickable { onClick() } // Добавили обработку клика
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
