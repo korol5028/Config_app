@@ -10,12 +10,12 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
 
-// ВАЖНО: Мы реализуем CoreCallbackHandler прямо в нашем VpnService!
 class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var isRunning = false
@@ -61,51 +61,63 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         try {
             val builder = Builder()
                 .setSession("Velox VPN")
-                .addAddress("10.0.0.2", 32)
+                .addAddress("172.19.0.1", 30) // Изменили IP туннеля
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
                 .setMtu(1500)
                 .setBlocking(true)
 
+            // ЖЕЛЕЗОБЕТОННЫЙ ФИКС: Исключаем наше приложение из туннеля
+            // Это гарантирует, что Xray сможет отправить данные на сервер напрямую
+            try {
+                builder.addDisallowedApplication(packageName)
+            } catch (e: Exception) {
+                Log.e("VeloxVPN", "Failed to disallow app: ${e.message}")
+            }
+
             vpnInterface = builder.establish()
             val fd = vpnInterface?.fd
             
             if (fd == null || fd == -1) {
-                Log.e("VeloxVPN", "Failed to establish TUN (fd is invalid)")
+                Log.e("VeloxVPN", "Failed to establish TUN")
                 stopVpn()
                 return
             }
 
-            // ГЛАВНЫЙ ФИКС: Передаем `this` (наш VpnService), чтобы libv2ray могла вызывать protect()
             coreController = Libv2ray.newCoreController(this)
-            coreController?.startLoop(xrayJsonConfig, fd)
+            // Проверяем, запустился ли движок
+            val result = coreController?.startLoop(xrayJsonConfig, fd)
+            
+            if (result != 0L) {
+                Log.e("VeloxVPN", "startLoop failed with code: $result")
+                showToast("Ошибка запуска ядра: $result")
+                stopVpn()
+                return
+            }
             
             Log.d("VeloxVPN", "Xray started successfully!")
             
         } catch (e: Throwable) {
             Log.e("VeloxVPN", "Error starting core", e)
+            showToast("Ошибка: ${e.message}")
             stopVpn()
         }
     }
 
-    // --- Реализация методов CoreCallbackHandler ---
-    override fun startup(): Long {
-        Log.d("VeloxVPN", "Core startup")
-        return 0
+    private fun showToast(msg: String) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            Toast.makeText(applicationContext, msg, Toast.LENGTH_LONG).show()
+        }
     }
 
-    override fun shutdown(): Long {
-        Log.d("VeloxVPN", "Core shutdown")
-        return 0
-    }
-
+    override fun startup(): Long = 0
+    override fun shutdown(): Long = 0
     override fun onEmitStatus(l: Long, s: String?): Long {
-        Log.d("VeloxVPN", "Core status: $s")
+        Log.d("VeloxVPN", "Status: $s")
         return 0
     }
 
-    // --- Парсер конфига (JSON с DNS и Routing) ---
     private fun buildXrayConfig(link: String): String? {
         try {
             if (!link.startsWith("vless://")) return null
