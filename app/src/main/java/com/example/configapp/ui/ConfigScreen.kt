@@ -34,7 +34,10 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
     var isConnected by remember { mutableStateOf(false) }
     var isExpanded by remember { mutableStateOf(true) }
     
+    // Храним выбранный сервер
     var selectedConfig by remember { mutableStateOf<ProxyConfig?>(null) }
+    
+    // Если список загрузился, а сервер не выбран, выбираем первый по умолчанию
     LaunchedEffect(configs) {
         if (selectedConfig == null && configs.isNotEmpty()) {
             selectedConfig = configs.first()
@@ -43,16 +46,18 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
 
     val context = LocalContext.current
 
-    // Запрос разрешения на VPN
+    // Лаунчер для запроса разрешения на VPN
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
+            // Пользователь разрешил VPN
             selectedConfig?.let { config ->
                 startVpnService(context, config.rawLink)
                 isConnected = true
             }
         } else {
+            // Пользователь отказал
             isConnected = false
             Toast.makeText(context, "Разрешение на VPN отклонено", Toast.LENGTH_SHORT).show()
         }
@@ -108,11 +113,12 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
                                 return@clickable
                             }
                             
-                            // Запрашиваем разрешение
+                            // Проверяем, нужно ли запрашивать разрешение
                             val prepareIntent = VpnService.prepare(context)
                             if (prepareIntent != null) {
                                 vpnPermissionLauncher.launch(prepareIntent)
                             } else {
+                                // Разрешение уже есть
                                 startVpnService(context, selectedConfig!!.rawLink)
                                 isConnected = true
                             }
@@ -134,6 +140,7 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
                 fontSize = 14.sp
             )
             
+            // Отображаем имя выбранного сервера под кнопкой
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = selectedConfig?.name ?: "Сервер не выбран",
@@ -201,7 +208,7 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
     }
 }
 
-// Запуск нашего внутреннего сервиса
+// Вспомогательная функция для запуска нашего сервиса
 fun startVpnService(context: android.content.Context, configLink: String) {
     val intent = Intent(context, VeloxVpnService::class.java).apply {
         putExtra("CONFIG_JSON", configLink)
