@@ -54,9 +54,13 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val xrayJsonConfig = buildXrayConfig(configLink)
         if (xrayJsonConfig == null) {
             Log.e("VeloxVPN", "Invalid config link")
+            showToast("Ошибка: неверный формат ссылки")
             stopVpn()
             return
         }
+
+        // ВЫВОДИМ КОНФИГ В ЛОГКАТ ДЛЯ ОТЛАДКИ (можно посмотреть через logcat)
+        Log.d("VeloxVPN_CONFIG", xrayJsonConfig)
 
         try {
             val builder = Builder()
@@ -68,7 +72,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 .setMtu(1500)
                 .setBlocking(true)
 
-            // Исключаем наше приложение из туннеля
             try {
                 builder.addDisallowedApplication(packageName)
             } catch (e: Exception) {
@@ -80,6 +83,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             
             if (fd == null || fd == -1) {
                 Log.e("VeloxVPN", "Failed to establish TUN")
+                showToast("Ошибка: не удалось создать TUN")
                 stopVpn()
                 return
             }
@@ -91,7 +95,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             
         } catch (e: Throwable) {
             Log.e("VeloxVPN", "Error starting core", e)
-            showToast("Ошибка: ${e.message}")
+            showToast("Ошибка запуска: ${e.message}")
             stopVpn()
         }
     }
@@ -109,6 +113,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         return 0
     }
 
+    // МИНИМАЛЬНЫЙ КОНФИГ ДЛЯ XRAY (VLESS + REALITY)
     private fun buildXrayConfig(link: String): String? {
         try {
             if (!link.startsWith("vless://")) return null
@@ -117,62 +122,44 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             val host = uri.host ?: return null
             val port = if (uri.port != -1) uri.port else 443
             
-            val security = uri.getQueryParameter("security") ?: "none"
+            val security = uri.getQueryParameter("security") ?: "reality"
             val sni = uri.getQueryParameter("sni") ?: uri.getQueryParameter("host") ?: host
             val pbk = uri.getQueryParameter("pbk") ?: ""
             val sid = uri.getQueryParameter("sid") ?: ""
             val flow = uri.getQueryParameter("flow") ?: ""
             val fp = uri.getQueryParameter("fp") ?: "chrome" 
-            val type = uri.getQueryParameter("type") ?: "tcp"
-            val path = uri.getQueryParameter("path") ?: "/"
-            val hostHeader = uri.getQueryParameter("host") ?: ""
 
-            val streamSettings = if (security == "reality") {
+            // Формируем realitySettings
+            val realitySettings = if (security == "reality") {
                 """
-                "network": "tcp",
-                "security": "reality",
                 "realitySettings": {
                   "serverName": "$sni",
                   "publicKey": "$pbk",
                   "shortId": "$sid",
-                  "fingerprint": "$fp",
-                  "spiderX": "/"
+                  "fingerprint": "$fp"
                 }
                 """.trimIndent()
-            } else if (security == "tls") {
+            } else {
+                // fallback на TLS, если вдруг
                 """
-                "network": "$type",
-                "security": "tls",
                 "tlsSettings": {
                   "serverName": "$sni",
                   "allowInsecure": false
-                },
-                ${if (type == "ws") "\"wsSettings\": { \"path\": \"$path\", \"headers\": { \"Host\": \"$hostHeader\" } }," else ""}
-                """.trimIndent()
-            } else {
-                """
-                "network": "$type",
-                "security": "none",
-                ${if (type == "ws") "\"wsSettings\": { \"path\": \"$path\", \"headers\": { \"Host\": \"$hostHeader\" } }," else ""}
+                }
                 """.trimIndent()
             }
 
-            val safeStreamSettings = streamSettings.trimEnd(',')
             val flowParam = if (flow.isNotEmpty()) ",\"flow\": \"$flow\"" else ""
 
+            // МИНИМАЛЬНЫЙ КОНФИГ (без dns, routing, sniffing)
             return """
                 {
                   "log": { "loglevel": "warning" },
-                  "dns": {
-                    "servers": [ "1.1.1.1", "8.8.8.8" ]
-                  },
                   "inbounds": [
                     {
                       "port": 10808,
-                      "listen": "127.0.0.1",
                       "protocol": "socks",
-                      "settings": { "udp": true },
-                      "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
+                      "settings": { "auth": "noauth" }
                     }
                   ],
                   "outbounds": [
@@ -188,21 +175,12 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                         ]
                       },
                       "streamSettings": {
-                        $safeStreamSettings
+                        "network": "tcp",
+                        "security": "$security",
+                        $realitySettings
                       }
-                    },
-                    { "protocol": "freedom", "tag": "direct" },
-                    { "protocol": "blackhole", "tag": "block" }
-                  ],
-                  "routing": {
-                    "rules": [
-                      {
-                        "type": "field",
-                        "ip": [ "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8" ],
-                        "outboundTag": "direct"
-                      }
-                    ]
-                  }
+                    }
+                  ]
                 }
             """.trimIndent()
         } catch (e: Throwable) {
