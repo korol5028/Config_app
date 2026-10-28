@@ -65,7 +65,6 @@ class VeloxVpnService : VpnService() {
         }
 
         try {
-            // ИСПРАВЛЕНО: используем Libv2ray.newCoreController и правильный обработчик
             val callback = object : CoreCallbackHandler {
                 override fun startup(): Long {
                     Log.d("VeloxVPN", "Core started")
@@ -84,7 +83,6 @@ class VeloxVpnService : VpnService() {
             }
             
             coreController = Libv2ray.newCoreController(callback)
-            // Запускаем ядро (в этой версии метод может называться startLoop)
             coreController?.startLoop(xrayJsonConfig, fd)
             
             Log.d("VeloxVPN", "Xray started successfully!")
@@ -96,7 +94,7 @@ class VeloxVpnService : VpnService() {
         }
     }
 
-    // Парсим vless:// и собираем JSON для Xray
+    // ИСПРАВЛЕННЫЙ ПАРСЕР (Добавили fingerprint и spiderX)
     private fun buildXrayConfig(link: String): String? {
         try {
             if (!link.startsWith("vless://")) return null
@@ -109,6 +107,9 @@ class VeloxVpnService : VpnService() {
             val pbk = uri.getQueryParameter("pbk") ?: ""
             val sid = uri.getQueryParameter("sid") ?: ""
             val flow = uri.getQueryParameter("flow") ?: ""
+            // ДОБАВЛЕНО: Отпечаток браузера (по умолчанию chrome)
+            val fp = uri.getQueryParameter("fp") ?: "chrome" 
+            val spx = uri.getQueryParameter("spx") ?: "/"
 
             return """
                 {
@@ -139,7 +140,9 @@ class VeloxVpnService : VpnService() {
                         "realitySettings": {
                           "serverName": "$sni",
                           "publicKey": "$pbk",
-                          "shortId": "$sid"
+                          "shortId": "$sid",
+                          "fingerprint": "$fp",
+                          "spiderX": "$spx"
                         }
                       }
                     }
