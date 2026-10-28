@@ -11,9 +11,6 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
@@ -31,14 +28,23 @@ class VeloxVpnService : VpnService() {
 
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
         
-        CoroutineScope(Dispatchers.IO).launch {
+        // 1. СРАЗУ ПОКАЗЫВАЕМ УВЕДОМЛЕНИЕ (Чтобы Android не убил сервис)
+        try {
+            startForeground(1, createNotification())
+        } catch (e: Exception) {
+            Log.e("VeloxVPN", "Failed to start foreground: ${e.message}")
+        }
+
+        // 2. Запускаем VPN в фоне
+        Thread {
             try {
                 startVpn(configLink)
             } catch (e: Exception) {
                 Log.e("VeloxVPN", "Crash prevented: ${e.message}")
                 stopVpn()
             }
-        }
+        }.start()
+
         return START_STICKY
     }
 
@@ -48,30 +54,32 @@ class VeloxVpnService : VpnService() {
 
         val xrayJsonConfig = buildXrayConfig(configLink)
         if (xrayJsonConfig == null) {
-            Log.e("VeloxVPN", "Invalid config link format")
-            stopSelf()
+            Log.e("VeloxVPN", "Invalid config link")
+            stopVpn()
             return
         }
 
-        // Создаем TUN
-        val builder = Builder()
-            .setSession("Velox VPN")
-            .addAddress("10.0.0.2", 32)
-            .addRoute("0.0.0.0", 0)
-            .addDnsServer("1.1.1.1")
-            .addDnsServer("8.8.8.8")
-            .setMtu(1500)
-            .setBlocking(true)
-
-        vpnInterface = builder.establish()
-        val fd = vpnInterface?.fd ?: run {
-            Log.e("VeloxVPN", "Failed to establish TUN")
-            stopSelf()
-            return
-        }
-
-        // Запускаем Xray
+        // Создаем TUN (в try-catch на случай отказа системы)
         try {
+            val builder = Builder()
+                .setSession("Velox VPN")
+                .addAddress("10.0.0.2", 32)
+                .addRoute("0.0.0.0", 0)
+                .addDnsServer("1.1.1.1")
+                .addDnsServer("8.8.8.8")
+                .setMtu(1500)
+                .setBlocking(true)
+
+            vpnInterface = builder.establish()
+            val fd = vpnInterface?.fd
+            
+            if (fd == null) {
+                Log.e("VeloxVPN", "Failed to establish TUN (fd is null)")
+                stopVpn()
+                return
+            }
+
+            // Запускаем Xray
             val callback = object : CoreCallbackHandler {
                 override fun startup(): Long { return 0 }
                 override fun shutdown(): Long { return 0 }
@@ -82,15 +90,13 @@ class VeloxVpnService : VpnService() {
             coreController?.startLoop(xrayJsonConfig, fd)
             
             Log.d("VeloxVPN", "Xray started successfully!")
-            startForeground(1, createNotification())
             
         } catch (e: Exception) {
-            Log.e("VeloxVPN", "Error starting core", e)
+            Log.e("VeloxVPN", "Error starting core or TUN", e)
             stopVpn()
         }
     }
 
-    // ИСПРАВЛЕННЫЙ ПАРСЕР: Поддерживает REALITY и обычный TLS
     private fun buildXrayConfig(link: String): String? {
         try {
             if (!link.startsWith("vless://")) return null
@@ -109,7 +115,6 @@ class VeloxVpnService : VpnService() {
             val path = uri.getQueryParameter("path") ?: "/"
             val hostHeader = uri.getQueryParameter("host") ?: ""
 
-            // Формируем блок безопасности в зависимости от протокола
             val streamSettings = if (security == "reality") {
                 """
                 "network": "tcp",
@@ -140,7 +145,6 @@ class VeloxVpnService : VpnService() {
                 """.trimIndent()
             }
 
-            // Убираем лишние запятые в конце блока
             val safeStreamSettings = streamSettings.trimEnd(',')
 
             return """
