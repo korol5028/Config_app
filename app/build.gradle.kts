@@ -40,6 +40,9 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
-    // Вот сюда мы подключили скачанный файл Xray
+    // Библиотека для скачивания подписок (OkHttp)
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Наш локальный файл Xray
     implementation(files("libs/libv2ray.aar"))
 }
