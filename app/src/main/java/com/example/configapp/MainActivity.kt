@@ -1,5 +1,6 @@
 package com.example.configapp
 
+import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -25,13 +26,38 @@ import com.example.configapp.ui.*
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Получаем доступ к сохраненным настройкам
+        val prefs = getSharedPreferences("velox_prefs", Context.MODE_PRIVATE)
+        val savedThemeName = prefs.getString("app_theme", "Индиго") ?: "Индиго"
+        val initialTheme = getThemeByName(savedThemeName)
+
         setContent {
-            var currentTheme by remember { mutableStateOf(HiddifyTheme) }
+            // Устанавливаем тему, которая была сохранена
+            var currentTheme by remember { mutableStateOf(initialTheme) }
 
             MaterialTheme(colorScheme = darkColorScheme(background = currentTheme.bg)) {
-                App(currentTheme = currentTheme, onThemeChange = { currentTheme = it })
+                App(
+                    currentTheme = currentTheme, 
+                    onThemeChange = { newTheme -> 
+                        currentTheme = newTheme
+                        // СОХРАНЯЕМ выбранную тему в память телефона
+                        prefs.edit().putString("app_theme", newTheme.name).apply() 
+                    }
+                )
             }
         }
+    }
+}
+
+// Вспомогательная функция, чтобы понимать, какую тему загружать
+fun getThemeByName(name: String): AppTheme {
+    return when (name) {
+        "Зелёная" -> GreenTheme
+        "Тёмно-синяя" -> DarkBlueTheme
+        "Белая" -> WhiteTheme
+        "Чёрная" -> BlackTheme
+        else -> HiddifyTheme
     }
 }
 
@@ -62,7 +88,6 @@ fun App(
                         showImport = true 
                     }
                 )
-                // ВОТ ЗДЕСЬ ДОБАВЛЕН viewModel
                 2 -> SettingsScreen(theme = currentTheme, onThemeChange = onThemeChange, viewModel = vm)
             }
         }
