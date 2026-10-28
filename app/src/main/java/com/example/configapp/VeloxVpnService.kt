@@ -85,8 +85,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             }
 
             coreController = Libv2ray.newCoreController(this)
-            
-            // ПРОСТО ВЫЗЫВАЕМ БЕЗ ПРОВЕРКИ ВОЗВРАЩАЕМОГО ЗНАЧЕНИЯ
             coreController?.startLoop(xrayJsonConfig, fd)
             
             Log.d("VeloxVPN", "Xray started successfully!")
@@ -198,7 +196,11 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                   ],
                   "routing": {
                     "rules": [
-                      { "type": "field", "ip": [ "geoip:private" ], "outboundTag": "direct" }
+                      {
+                        "type": "field",
+                        "ip": [ "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8" ],
+                        "outboundTag": "direct"
+                      }
                     ]
                   }
                 }
