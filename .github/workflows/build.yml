@@ -25,6 +25,11 @@ jobs:
         with:
           gradle-version: 8.5
 
+      - name: Download Xray Core Library
+        run: |
+          mkdir -p app/libs
+          curl -L -o app/libs/libv2ray.aar https://github.com/2dust/AndroidLibXrayLite/releases/download/v26.9.30/libv2ray.aar
+
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
