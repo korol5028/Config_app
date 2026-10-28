@@ -7,7 +7,6 @@ import androidx.lifecycle.viewModelScope
 import com.example.configapp.data.ConfigParser
 import com.example.configapp.data.ConfigRepository
 import com.example.configapp.data.ProxyConfig
-import com.example.configapp.data.Protocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,8 +15,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONArray
-import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class ConfigViewModel(app: Application) : AndroidViewModel(app) {
@@ -28,9 +25,10 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
+    // Увеличили таймаут, чтобы медленные сервера успевали отдать файл
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
         .build()
 
     init { viewModelScope.launch { _configs.value = repo.loadAll() } }
@@ -41,156 +39,100 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
             val input = text.trim()
             
             if (input.startsWith("http://") || input.startsWith("https://")) {
-                val (downloadedItems, errorMsg) = downloadAndParseSubscription(input)
-                
-                if (errorMsg != null) {
-                    _message.value = errorMsg
-                } else if (downloadedItems.isEmpty()) {
-                    _message.value = "Не найдено валидных конфигов"
-                } else {
-                    val merged = _configs.value + downloadedItems
-                    _configs.value = merged
-                    repo.saveAll(merged)
-                    _message.value = "Добавлено конфигов: ${downloadedItems.size}"
+                // Это ссылка на подписку
+                val items = downloadAndParseSubscription(input)
+                if (items.isEmpty()) {
+                    _message.value = "Ошибка: Не удалось загрузить подписку (сервер блокирует или пустой ответ)"
+                    return@launch
                 }
+                val merged = _configs.value + items
+                _configs.value = merged
+                repo.saveAll(merged)
+                _message.value = "Добавлено конфигов из подписки: ${items.size}"
             } else {
+                // Это обычные конфиги текстом
                 val items = parseRawText(input)
                 if (items.isEmpty()) {
                     _message.value = "Не найдено валидных конфигов"
-                } else {
-                    val merged = _configs.value + items
-                    _configs.value = merged
-                    repo.saveAll(merged)
-                    _message.value = "Добавлено конфигов: ${items.size}"
+                    return@launch
                 }
+                val merged = _configs.value + items
+                _configs.value = merged
+                repo.saveAll(merged)
+                _message.value = "Добавлено конфигов: ${items.size}"
             }
         }
     }
 
-    private suspend fun downloadAndParseSubscription(url: String): Pair<List<ProxyConfig>, String?> {
+    private suspend fun downloadAndParseSubscription(url: String): List<ProxyConfig> {
         return withContext(Dispatchers.IO) {
             try {
-                val request = Request.Builder()
-                    .url(url)
-                    .header("User-Agent", "v2rayNG/1.8.5")
-                    .build()
+                // Пробуем разные User-Agent, так как некоторые панели отдают конфиг только клиентам
+                val userAgents = listOf(
+                    "v2rayNG/1.8.5",
+                    "Happ/1.0",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                )
                 
-                val response = httpClient.newCall(request).execute()
-                if (!response.isSuccessful) return@withContext Pair(emptyList<ProxyConfig>(), "HTTP Error: ${response.code}")
+                var body: String? = null
                 
-                val body = response.body?.string()?.trim() ?: return@withContext Pair(emptyList<ProxyConfig>(), "Пустой ответ")
-
-                // 1. Пытаемся распарсить как массив JSON (Xray configs)
-                if (body.startsWith("[")) {
-                    val parsedJson = parseXrayJsonArray(body)
-                    if (parsedJson.isNotEmpty()) {
-                        return@withContext Pair(parsedJson, null)
+                for (ua in userAgents) {
+                    val request = Request.Builder()
+                        .url(url)
+                        .header("User-Agent", ua)
+                        .build()
+                    
+                    val response = httpClient.newCall(request).execute()
+                    if (response.isSuccessful) {
+                        body = response.body?.string()
+                        if (!body.isNullOrBlank()) break
                     }
                 }
-
-                // 2. Пытаемся распарсить как обычные ссылки (vless://...)
-                val linkRegex = Regex("""(vless|vmess|trojan|ss)://[^\s"']+""")
-                val foundLinks = linkRegex.findAll(body).map { it.value }.toList()
                 
-                if (foundLinks.isNotEmpty()) {
-                    val parsed = parseRawText(foundLinks.joinToString("\n"))
-                    if (parsed.isNotEmpty()) {
-                        return@withContext Pair(parsed, null)
-                    }
+                if (body.isNullOrBlank()) return@withContext emptyList()
+                
+                body = body.trim()
+
+                // Если сервер вернул страницу с ошибкой вместо конфига
+                if (body.contains("<html", ignoreCase = true)) {
+                    return@withContext emptyList()
                 }
 
-                // 3. Если это Base64
+                // Пытаемся расшифровать Base64 (включая URL-safe формат)
                 if (!body.contains("://")) {
                     try {
-                        val cleanBody = body.replace("\n", "").replace("\r", "").replace("-", "+").replace("_", "/")
-                        val padded = when (cleanBody.length % 4) { 2 -> "$cleanBody=="; 3 -> "$cleanBody="; else -> cleanBody }
-                        val decodedBody = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
+                        val cleanBase64 = body
+                            .replace('-', '+')
+                            .replace('_', '/')
+                            .replace("\n", "")
+                            .replace("\r", "")
                         
-                        val decodedLinks = linkRegex.findAll(decodedBody).map { it.value }.toList()
-                        if (decodedLinks.isNotEmpty()) {
-                             val parsed = parseRawText(decodedLinks.joinToString("\n"))
-                             if (parsed.isNotEmpty()) {
-                                 return@withContext Pair(parsed, null)
-                             }
+                        val padded = when (cleanBase64.length % 4) {
+                            2 -> "$cleanBase64=="
+                            3 -> "$cleanBase64="
+                            else -> cleanBase64
+                        }
+                        val decoded = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
+                        if (decoded.contains("://")) {
+                            body = decoded
                         }
                     } catch (e: Exception) {
-                        return@withContext Pair(emptyList<ProxyConfig>(), "Ошибка Base64")
+                        // Если не вышло декодировать, пробуем парсить как есть
                     }
                 }
                 
-                return@withContext Pair(emptyList<ProxyConfig>(), "Не распознано. Ответ: ${body.take(30)}")
-
+                parseRawText(body)
             } catch (e: Exception) {
-                Pair(emptyList<ProxyConfig>(), "Ошибка сети: ${e.message?.take(20)}")
+                e.printStackTrace()
+                emptyList()
             }
         }
-    }
-
-    // ПАРСЕР ДЛЯ ФОРМАТА XRAY JSON
-    private fun parseXrayJsonArray(jsonString: String): List<ProxyConfig> {
-        val configs = mutableListOf<ProxyConfig>()
-        try {
-            val jsonArray = JSONArray(jsonString)
-            for (i in 0 until jsonArray.length()) {
-                val obj = jsonArray.getJSONObject(i)
-                val name = obj.optString("remarks", "Server $i")
-                val outbounds = obj.optJSONArray("outbounds") ?: continue
-                
-                // Ищем в outbounds блок с протоколом vless
-                for (j in 0 until outbounds.length()) {
-                    val outbound = outbounds.getJSONObject(j)
-                    val protocol = outbound.optString("protocol")
-                    
-                    if (protocol == "vless") {
-                        val settings = outbound.optJSONObject("settings") ?: continue
-                        val vnext = settings.optJSONArray("vnext")?.optJSONObject(0) ?: continue
-                        val host = vnext.optString("address")
-                        val port = vnext.optInt("port")
-                        val users = vnext.optJSONArray("users")?.optJSONObject(0) ?: continue
-                        val uuid = users.optString("id")
-                        val flow = users.optString("flow", "")
-                        
-                        val streamSettings = outbound.optJSONObject("streamSettings") ?: continue
-                        val network = streamSettings.optString("network", "tcp")
-                        val security = streamSettings.optString("security", "none")
-                        
-                        val extra = mutableMapOf<String, String>()
-                        extra["uuid"] = uuid
-                        if (flow.isNotEmpty()) extra["flow"] = flow
-                        extra["network"] = network
-                        
-                        if (security == "reality") {
-                            val reality = streamSettings.optJSONObject("realitySettings") ?: continue
-                            extra["pbk"] = reality.optString("publicKey")
-                            extra["sid"] = reality.optString("shortId")
-                            extra["sni"] = reality.optString("serverName")
-                            extra["fp"] = reality.optString("fingerprint", "chrome")
-                        }
-                        
-                        val config = ProxyConfig(
-                            id = UUID.randomUUID().toString(),
-                            name = name,
-                            protocol = Protocol.VLESS,
-                            host = host,
-                            port = port,
-                            rawLink = "", 
-                            extra = extra
-                        )
-                        configs.add(config)
-                        break // Берем первый vless из этого объекта и идем к следующему
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        return configs
     }
 
     private fun parseRawText(text: String): List<ProxyConfig> {
         return text.split('\n', '\r')
             .map { it.trim() }
-            .filter { it.isNotEmpty() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") } // Игнорируем комментарии
             .mapNotNull { ConfigParser.parse(it) }
     }
 
