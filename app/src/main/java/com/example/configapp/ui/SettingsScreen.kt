@@ -1,15 +1,21 @@
 package com.example.configapp.ui
 
+import android.Manifest
 import android.content.Intent
-import android.net.Uri
+import android.content.pm.PackageManager
+import android.net.VpnService
+import android.os.Build
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -18,155 +24,187 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import com.example.configapp.VeloxVpnService
+import com.example.configapp.data.ProxyConfig
 
 @Composable
-fun SettingsScreen(theme: AppTheme, onThemeChange: (AppTheme) -> Unit, viewModel: ConfigViewModel) {
+fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
+    val configs by viewModel.configs.collectAsState()
+    val subInfo by viewModel.subInfo.collectAsState()
+    var isConnected by remember { mutableStateOf(false) }
+    
+    var selectedConfig by remember { mutableStateOf<ProxyConfig?>(null) }
+    LaunchedEffect(configs) {
+        if (selectedConfig == null && configs.isNotEmpty()) {
+            selectedConfig = configs.first()
+        }
+    }
+
     val context = LocalContext.current
+
+    // Лаунчер для запроса разрешения на Уведомления (Android 13+)
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            val prepareIntent = VpnService.prepare(context)
+            if (prepareIntent == null) {
+                startVpnService(context, selectedConfig!!.rawLink)
+                isConnected = true
+            }
+        } else {
+            Toast.makeText(context, "Без уведомлений VPN не сможет работать", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // Лаунчер для запроса разрешения на VPN
+    val vpnPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+                    startVpnService(context, selectedConfig!!.rawLink)
+                    isConnected = true
+                } else {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            } else {
+                startVpnService(context, selectedConfig!!.rawLink)
+                isConnected = true
+            }
+        } else {
+            isConnected = false
+        }
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(theme.bg)
-            .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp)
     ) {
-        Spacer(modifier = Modifier.height(24.dp))
-        Text("Настройки", color = theme.text, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(24.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 24.dp),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Default.Settings, contentDescription = "Настройки", tint = theme.textGray)
+        }
 
-        // Оформление (Темы)
-        SettingsGroupTitle("Оформление", theme)
-        SettingsCard(theme) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).background(theme.selectedCardBg),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(Icons.Default.Palette, contentDescription = null, tint = theme.accent, modifier = Modifier.size(20.dp))
-                    }
-                    Spacer(modifier = Modifier.width(16.dp))
-                    Text("Тема", color = theme.text, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                    Spacer(modifier = Modifier.weight(1f))
-                    Text(theme.name, color = theme.textGray, fontSize = 14.sp)
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Box(modifier = Modifier.size(280.dp).border(1.dp, theme.border, CircleShape))
+                Box(modifier = Modifier.size(220.dp).border(1.dp, theme.border, CircleShape))
+                Box(
+                    modifier = Modifier
+                        .size(160.dp)
+                        .clip(CircleShape)
+                        .background(if (isConnected) theme.accent else theme.cardBg)
+                        .clickable {
+                            if (isConnected) {
+                                val intent = Intent(context, VeloxVpnService::class.java).apply { action = "STOP" }
+                                context.startService(intent)
+                                isConnected = false
+                            } else {
+                                if (selectedConfig == null) {
+                                    Toast.makeText(context, "Сначала добавьте сервер", Toast.LENGTH_SHORT).show()
+                                    return@clickable
+                                }
+                                val prepareIntent = VpnService.prepare(context)
+                                if (prepareIntent != null) {
+                                    vpnPermissionLauncher.launch(prepareIntent)
+                                } else {
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+                                            startVpnService(context, selectedConfig!!.rawLink)
+                                            isConnected = true
+                                        } else {
+                                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                        }
+                                    } else {
+                                        startVpnService(context, selectedConfig!!.rawLink)
+                                        isConnected = true
+                                    }
+                                }
+                            }
+                        },
+                    contentAlignment = Alignment.Center
                 ) {
-                    ThemeColorButton(GreenTheme, theme, Color(0xFFA3E635), onThemeChange)
-                    ThemeColorButton(DarkBlueTheme, theme, Color(0xFF3B82F6), onThemeChange)
-                    ThemeColorButton(WhiteTheme, theme, Color(0xFFF3F4F6), onThemeChange)
-                    ThemeColorButton(BlackTheme, theme, Color(0xFF111111), onThemeChange)
-                    ThemeColorButton(HiddifyTheme, theme, Color(0xFF8B5CF6), onThemeChange)
+                    Icon(Icons.Default.PowerSettingsNew, contentDescription = null, tint = Color.White, modifier = Modifier.size(64.dp))
                 }
             }
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(text = selectedConfig?.name ?: "Сервер не выбран", color = theme.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text(text = if (isConnected) "ПОДКЛЮЧЕНО" else "НАЖМИТЕ ДЛЯ ПОДКЛЮЧЕНИЯ", color = if (isConnected) theme.accent else theme.textGray, fontSize = 11.sp, letterSpacing = 1.sp)
         }
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // НОВЫЙ БЛОК: Поддержка и Telegram
-        SettingsGroupTitle("Помощь", theme)
-        SettingsCard(theme) {
-            SettingsRowItem(
-                icon = Icons.Default.Send, // Иконка Telegram (самолетик)
-                iconBg = Color(0xFF1E3A8A), // Синий фон под иконку
-                title = "Telegram-канал",
-                subtitle = "Новости и обновления Velox",
-                theme = theme,
-                onClick = {
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/твой_канал"))
-                    context.startActivity(intent)
-                }
-            )
-            HorizontalDivider(color = theme.bg)
-            SettingsRowItem(
-                icon = Icons.Default.SupportAgent,
-                iconBg = Color(0xFF3A1E1E),
-                title = "Поддержка",
-                subtitle = "Написать в поддержку / Купить подписку",
-                theme = theme,
-                onClick = {
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/твой_бот_поддержки"))
-                    context.startActivity(intent)
-                }
-            )
+        LazyColumn(contentPadding = PaddingValues(bottom = 80.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(configs) { cfg ->
+                SubscriptionCard(
+                    cfg = cfg,
+                    isSelected = (cfg.id == selectedConfig?.id),
+                    theme = theme,
+                    subInfo = subInfo,
+                    isFirstInList = cfg.id == configs.firstOrNull()?.id,
+                    onClick = { selectedConfig = cfg },
+                    onDelete = { viewModel.delete(cfg) }
+                )
+            }
         }
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        // Данные (Очистка)
-        SettingsGroupTitle("Данные", theme)
-        SettingsCard(theme) {
-            SettingsRowItem(
-                icon = Icons.Default.Delete,
-                iconBg = Color(0xFF3A1E1E),
-                title = "Очистить все сервера",
-                subtitle = "Удалить все добавленные конфиги",
-                theme = theme,
-                onClick = { viewModel.clearAll() }
-            )
-        }
-
-        Spacer(modifier = Modifier.height(100.dp))
     }
 }
 
 @Composable
-fun ThemeColorButton(targetTheme: AppTheme, currentTheme: AppTheme, circleColor: Color, onThemeChange: (AppTheme) -> Unit) {
-    val isSelected = targetTheme.name == currentTheme.name
-    Box(
-        modifier = Modifier
-            .size(48.dp)
-            .clip(CircleShape)
-            .background(circleColor)
-            .border(2.dp, if (isSelected) currentTheme.accent else Color(0xFF555555), CircleShape)
-            .clickable { onThemeChange(targetTheme) },
-        contentAlignment = Alignment.Center
+fun SubscriptionCard(cfg: ProxyConfig, isSelected: Boolean, theme: AppTheme, subInfo: SubInfo?, isFirstInList: Boolean, onClick: () -> Unit, onDelete: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable { onClick() },
+        colors = CardDefaults.cardColors(containerColor = if (isSelected) theme.selectedCardBg else theme.cardBg),
+        shape = RoundedCornerShape(16.dp)
     ) {
-        if (isSelected) {
-            Icon(
-                Icons.Default.Check, 
-                contentDescription = null, 
-                tint = if (circleColor == Color(0xFF111111) || circleColor == Color(0xFF16123F) || circleColor == Color(0xFF3B82F6)) Color.White else Color.Black
-            )
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.KeyboardArrowRight, contentDescription = null, tint = theme.textGray)
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(cfg.name, color = theme.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text("Автообновление: вкл.", color = theme.textGray, fontSize = 11.sp)
+                }
+                Icon(Icons.Default.Refresh, contentDescription = null, tint = theme.textGray, modifier = Modifier.padding(end = 12.dp))
+                Icon(Icons.Default.Speed, contentDescription = null, tint = theme.textGray, modifier = Modifier.padding(end = 12.dp))
+                Icon(Icons.Default.MoreVert, contentDescription = "Удалить", tint = theme.textGray, modifier = Modifier.clickable { onDelete() })
+            }
+
+            if (isSelected && isFirstInList && subInfo != null) {
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = theme.border, thickness = 1.dp)
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(subInfo.traffic, color = theme.text, fontSize = 13.sp, modifier = Modifier.border(1.dp, theme.border, RoundedCornerShape(8.dp)).padding(horizontal = 12.dp, vertical = 4.dp))
+                    Text("Истекает: ${subInfo.expire}", color = theme.textGray, fontSize = 13.sp)
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("📦 ${subInfo.title}", color = theme.textGray, fontSize = 13.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
+                Text("🔥 Трафик: ${subInfo.traffic}", color = theme.textGray, fontSize = 13.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
+            }
         }
     }
 }
 
-@Composable
-fun SettingsGroupTitle(title: String, theme: AppTheme) {
-    Text(title, color = theme.textGray, fontSize = 14.sp, modifier = Modifier.padding(start = 16.dp, bottom = 8.dp))
-}
-
-@Composable
-fun SettingsCard(theme: AppTheme, content: @Composable () -> Unit) {
-    Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(theme.cardBg)) {
-        content()
+fun startVpnService(context: android.content.Context, configLink: String) {
+    val intent = Intent(context, VeloxVpnService::class.java).apply {
+        putExtra("CONFIG_JSON", configLink)
     }
-}
-
-@Composable
-fun SettingsRowItem(icon: ImageVector, iconBg: Color, title: String, subtitle: String, theme: AppTheme, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).background(iconBg), contentAlignment = Alignment.Center) {
-            Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
-        }
-        Spacer(modifier = Modifier.width(16.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, color = theme.text, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-            Text(subtitle, color = theme.textGray, fontSize = 13.sp)
-        }
-        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = theme.textGray)
-    }
+    ContextCompat.startForegroundService(context, intent)
 }
