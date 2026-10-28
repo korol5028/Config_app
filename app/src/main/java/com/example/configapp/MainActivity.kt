@@ -6,6 +6,9 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -17,6 +20,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -44,11 +48,9 @@ fun App(
     var selectedTab by remember { mutableIntStateOf(0) }
     var showImport by remember { mutableStateOf(false) }
     
-    // ДОБАВЛЕНО: Состояние для всплывающих сообщений
     val snackbarHostState = remember { SnackbarHostState() }
     val message by vm.message.collectAsState()
 
-    // ДОБАВЛЕНО: Показ сообщений
     LaunchedEffect(message) {
         message?.let {
             snackbarHostState.showSnackbar(it)
@@ -58,7 +60,7 @@ fun App(
 
     Scaffold(
         containerColor = currentTheme.bg,
-        snackbarHost = { SnackbarHost(snackbarHostState) }, // ДОБАВЛЕНО СЮДА
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             FloatingBottomNav(selectedTab, currentTheme) { selectedTab = it }
         },
@@ -77,7 +79,7 @@ fun App(
         Box(modifier = Modifier.padding(padding)) {
             when (selectedTab) {
                 0 -> ConfigScreen(viewModel = vm, theme = currentTheme)
-                1 -> ServersListScreen(currentTheme)
+                1 -> ServersListScreen(vm = vm, theme = currentTheme) // НОВЫЙ ЭКРАН
                 2 -> SettingsScreen(theme = currentTheme, onThemeChange = onThemeChange)
             }
         }
@@ -95,10 +97,49 @@ fun App(
     }
 }
 
+// НОВЫЙ ЭКРАН СПИСКА СЕРВЕРОВ
 @Composable
-fun ServersListScreen(theme: AppTheme) {
-    Box(Modifier.fillMaxSize().background(theme.bg), contentAlignment = Alignment.Center) {
-        Text("Полный список серверов в разработке", color = theme.textGray)
+fun ServersListScreen(vm: ConfigViewModel, theme: AppTheme) {
+    val configs by vm.configs.collectAsState()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(theme.bg)
+            .padding(horizontal = 16.dp)
+    ) {
+        Spacer(modifier = Modifier.height(24.dp))
+        
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Мои сервера", color = theme.text, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            Box(
+                modifier = Modifier.clip(CircleShape).background(theme.selectedCardBg).padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text("${configs.size}", color = theme.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+
+        if (configs.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Список пуст.\nДобавьте подписку на главной.", color = theme.textGray, textAlign = TextAlign.Center)
+            }
+        } else {
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(bottom = 100.dp)
+            ) {
+                items(configs, key = { it.id }) { cfg ->
+                    // Используем ту же карточку, что и на главном экране
+                    ServerCard(cfg, isSelected = false, theme = theme)
+                }
+            }
+        }
     }
 }
 
