@@ -16,7 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
-import java.util.concurrent.TimeUnit
+import libv2ray.Libv2ray
 
 class VeloxVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -31,7 +31,6 @@ class VeloxVpnService : VpnService() {
 
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
         
-        // Запускаем в фоновом потоке, чтобы не вешать интерфейс
         CoroutineScope(Dispatchers.IO).launch {
             startVpn(configLink)
         }
@@ -42,7 +41,6 @@ class VeloxVpnService : VpnService() {
         if (isRunning) return
         isRunning = true
 
-        // 1. Конвертируем ссылку vless:// в JSON для Xray
         val xrayJsonConfig = buildXrayConfig(configLink)
         if (xrayJsonConfig == null) {
             Log.e("VeloxVPN", "Invalid config link format")
@@ -50,7 +48,6 @@ class VeloxVpnService : VpnService() {
             return
         }
 
-        // 2. Создаем TUN интерфейс
         val builder = Builder()
             .setSession("Velox VPN")
             .addAddress("10.0.0.2", 32)
@@ -67,19 +64,27 @@ class VeloxVpnService : VpnService() {
             return
         }
 
-        // 3. Запускаем Xray Core
         try {
+            // ИСПРАВЛЕНО: используем Libv2ray.newCoreController и правильный обработчик
             val callback = object : CoreCallbackHandler {
-                override fun onCoreStateChanged(state: Int) {
-                    Log.d("VeloxVPN", "Core state: $state")
+                override fun startup(): Long {
+                    Log.d("VeloxVPN", "Core started")
+                    return 0
                 }
-                override fun onMessageReceived(message: String) {
-                    Log.d("VeloxVPN", "Core msg: $message")
+
+                override fun shutdown(): Long {
+                    Log.d("VeloxVPN", "Core stopped")
+                    return 0
+                }
+
+                override fun onEmitStatus(l: Long, s: String?): Long {
+                    Log.d("VeloxVPN", "Core status: $s")
+                    return 0
                 }
             }
             
-            coreController = CoreController(callback)
-            // Передаем JSON и файловый дескриптор (fd) в ядро
+            coreController = Libv2ray.newCoreController(callback)
+            // Запускаем ядро (в этой версии метод может называться startLoop)
             coreController?.startLoop(xrayJsonConfig, fd)
             
             Log.d("VeloxVPN", "Xray started successfully!")
