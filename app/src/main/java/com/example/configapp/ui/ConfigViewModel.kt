@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.configapp.data.ConfigParser
 import com.example.configapp.data.ConfigRepository
 import com.example.configapp.data.ProxyConfig
+import com.example.configapp.data.Protocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,6 +17,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class ConfigViewModel(app: Application) : AndroidViewModel(app) {
@@ -78,13 +80,41 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                 
                 val body = response.body?.string()?.trim() ?: return@withContext Pair(emptyList<ProxyConfig>(), "Пустой ответ")
 
-                // Вызываем наш супер-парсер
-                val extractedLinks = extractLinksFromText(body)
+                // 1. Пытаемся распарсить как массив JSON (Xray configs)
+                if (body.startsWith("[")) {
+                    val parsedJson = parseXrayJsonArray(body)
+                    if (parsedJson.isNotEmpty()) {
+                        return@withContext Pair(parsedJson, null)
+                    }
+                }
+
+                // 2. Пытаемся распарсить как обычные ссылки (vless://...)
+                val linkRegex = Regex("""(vless|vmess|trojan|ss)://[^\s"']+""")
+                val foundLinks = linkRegex.findAll(body).map { it.value }.toList()
                 
-                if (extractedLinks.isNotEmpty()) {
-                    val parsed = parseRawText(extractedLinks.joinToString("\n"))
+                if (foundLinks.isNotEmpty()) {
+                    val parsed = parseRawText(foundLinks.joinToString("\n"))
                     if (parsed.isNotEmpty()) {
                         return@withContext Pair(parsed, null)
+                    }
+                }
+
+                // 3. Если это Base64
+                if (!body.contains("://")) {
+                    try {
+                        val cleanBody = body.replace("\n", "").replace("\r", "").replace("-", "+").replace("_", "/")
+                        val padded = when (cleanBody.length % 4) { 2 -> "$cleanBody=="; 3 -> "$cleanBody="; else -> cleanBody }
+                        val decodedBody = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
+                        
+                        val decodedLinks = linkRegex.findAll(decodedBody).map { it.value }.toList()
+                        if (decodedLinks.isNotEmpty()) {
+                             val parsed = parseRawText(decodedLinks.joinToString("\n"))
+                             if (parsed.isNotEmpty()) {
+                                 return@withContext Pair(parsed, null)
+                             }
+                        }
+                    } catch (e: Exception) {
+                        return@withContext Pair(emptyList<ProxyConfig>(), "Ошибка Base64")
                     }
                 }
                 
@@ -96,58 +126,65 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // МЕТОД, КОТОРЫЙ ВЫТАСКИВАЕТ ССЫЛКИ ИЗ ЛЮБОГО ФОРМАТА
-    private fun extractLinksFromText(text: String): List<String> {
-        val links = mutableListOf<String>()
-        // Ищем популярные протоколы
-        val regex = Regex("""(vless|vmess|trojan|ss|hysteria|hysteria2|hy2|tuic)://[^\s"']+""")
-        
-        // 1. Прямой поиск
-        links.addAll(regex.findAll(text).map { it.value })
-        
-        // 2. Поиск внутри Base64 (если весь текст закодирован)
-        if (links.isEmpty()) {
-            try {
-                val clean = text.replace("\n", "").replace("\r", "").replace("-", "+").replace("_", "/")
-                val padded = when (clean.length % 4) { 2 -> "$clean=="; 3 -> "$clean="; else -> clean }
-                val decoded = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
-                links.addAll(regex.findAll(decoded).map { it.value })
-            } catch (e: Exception) {}
-        }
-        
-        // 3. Если это JSON - заходим внутрь и проверяем каждое поле
-        if (links.isEmpty() && text.trim().startsWith("[")) {
-            try {
-                val jsonArray = JSONArray(text)
-                for (i in 0 until jsonArray.length()) {
-                    val obj = jsonArray.optJSONObject(i)
-                    if (obj != null) {
-                        val keys = obj.keys()
-                        while (keys.hasNext()) {
-                            val key = keys.next()
-                            val value = obj.optString(key)
-                            
-                            // Если значение - это прямая ссылка
-                            if (regex.containsMatchIn(value)) {
-                                links.addAll(regex.findAll(value).map { it.value })
-                            } else {
-                                // Если значение - это Base64
-                                try {
-                                    val clean = value.replace("\n", "").replace("\r", "").replace("-", "+").replace("_", "/")
-                                    val padded = when (clean.length % 4) { 2 -> "$clean=="; 3 -> "$clean="; else -> clean }
-                                    val decoded = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
-                                    if (regex.containsMatchIn(decoded)) {
-                                        links.addAll(regex.findAll(decoded).map { it.value })
-                                    }
-                                } catch (e: Exception) {}
-                            }
+    // ПАРСЕР ДЛЯ ФОРМАТА XRAY JSON
+    private fun parseXrayJsonArray(jsonString: String): List<ProxyConfig> {
+        val configs = mutableListOf<ProxyConfig>()
+        try {
+            val jsonArray = JSONArray(jsonString)
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.getJSONObject(i)
+                val name = obj.optString("remarks", "Server $i")
+                val outbounds = obj.optJSONArray("outbounds") ?: continue
+                
+                // Ищем в outbounds блок с протоколом vless
+                for (j in 0 until outbounds.length()) {
+                    val outbound = outbounds.getJSONObject(j)
+                    val protocol = outbound.optString("protocol")
+                    
+                    if (protocol == "vless") {
+                        val settings = outbound.optJSONObject("settings") ?: continue
+                        val vnext = settings.optJSONArray("vnext")?.optJSONObject(0) ?: continue
+                        val host = vnext.optString("address")
+                        val port = vnext.optInt("port")
+                        val users = vnext.optJSONArray("users")?.optJSONObject(0) ?: continue
+                        val uuid = users.optString("id")
+                        val flow = users.optString("flow", "")
+                        
+                        val streamSettings = outbound.optJSONObject("streamSettings") ?: continue
+                        val network = streamSettings.optString("network", "tcp")
+                        val security = streamSettings.optString("security", "none")
+                        
+                        val extra = mutableMapOf<String, String>()
+                        extra["uuid"] = uuid
+                        if (flow.isNotEmpty()) extra["flow"] = flow
+                        extra["network"] = network
+                        
+                        if (security == "reality") {
+                            val reality = streamSettings.optJSONObject("realitySettings") ?: continue
+                            extra["pbk"] = reality.optString("publicKey")
+                            extra["sid"] = reality.optString("shortId")
+                            extra["sni"] = reality.optString("serverName")
+                            extra["fp"] = reality.optString("fingerprint", "chrome")
                         }
+                        
+                        val config = ProxyConfig(
+                            id = UUID.randomUUID().toString(),
+                            name = name,
+                            protocol = Protocol.VLESS,
+                            host = host,
+                            port = port,
+                            rawLink = "", 
+                            extra = extra
+                        )
+                        configs.add(config)
+                        break // Берем первый vless из этого объекта и идем к следующему
                     }
                 }
-            } catch (e: Exception) {}
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
-        
-        return links.distinct()
+        return configs
     }
 
     private fun parseRawText(text: String): List<ProxyConfig> {
