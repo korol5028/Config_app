@@ -75,14 +75,12 @@ object ConfigParser {
             var method = ""
             var password = ""
 
-            // Пробуем декодировать Base64
             val decodedUserInfo = decodeBase64(userInfo)
             
             if (decodedUserInfo != null && decodedUserInfo.contains(":")) {
                 method = decodedUserInfo.substringBefore(":")
                 password = decodedUserInfo.substringAfter(":")
             } else if (userInfo.contains(":")) {
-                // Если не Base64, значит открытый текст (твой случай)
                 method = decode(userInfo.substringBefore(":"))
                 password = decode(userInfo.substringAfter(":"))
             } else {
