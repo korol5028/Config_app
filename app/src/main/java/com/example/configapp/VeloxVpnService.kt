@@ -100,18 +100,19 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 return
             }
 
-            // 1. Запускаем Xray в фоне (без блокирующего ожидания)
+            // 1. Запускаем Xray в фоне
             coreController = Libv2ray.newCoreController(this)
             Thread {
                 try {
                     coreController?.startLoop(xrayJson, fd)
+                    Log.d("VeloxVPN", "Xray запущен")
                 } catch (e: Throwable) {
                     Log.e("VeloxVPN", "Xray упал: ${e.message}")
                     stopVpn("Xray упал: ${e.message}")
                 }
             }.start()
 
-            // 2. Ждем ровно 300 мс, чтобы Xray поднял порт 10808, и запускаем мост
+            // 2. Ждем ровно 300 мс, чтобы Xray открыл порт 10808, и запускаем мост
             TimeUnit.MILLISECONDS.sleep(300)
 
             val yaml = buildHevYaml(filesDir.absolutePath + "/hev.log")
@@ -320,7 +321,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         outbound.put("streamSettings", stream)
     }
 
-    // ОБНОВЛЕННЫЙ TROJAN (с fingerprint и allowInsecure)
     private fun buildTrojanOutbound(link: String, outbound: JSONObject) {
         val uri = Uri.parse(link)
         val password = uri.userInfo ?: return
@@ -351,6 +351,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         outbound.put("streamSettings", stream)
     }
 
+    // ВНИМАНИЕ: Xray-core не поддерживает Hysteria2, этот сервер не заработает!
     private fun buildHysteria2Outbound(link: String, outbound: JSONObject) {
         val uri = Uri.parse(link)
         outbound.put("protocol", "hysteria")
@@ -377,20 +378,21 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val thread = tunnelThread
         tunnelThread = null
 
-        // Выносим остановку JNI в отдельный поток, чтобы не вешать UI
-        Thread {
-            try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
-            thread?.interrupt()
-            try { ctrl?.stopLoop() } catch (e: Throwable) {}
-            try { pfd?.close() } catch (e: Throwable) {}
-        }.start()
-
+        // Отправляем бродкаст ДО остановки потоков, чтобы UI сразу понял
         if (errorMsg != null) {
             sendStateBroadcast(STATE_ERROR, errorMsg)
             showToast(errorMsg)
         } else {
             sendStateBroadcast(STATE_DISCONNECTED, null)
         }
+
+        // Принудительно закрываем всё в фоне
+        Thread {
+            try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
+            thread?.interrupt()
+            try { ctrl?.stopLoop() } catch (e: Throwable) {}
+            try { pfd?.close() } catch (e: Throwable) {}
+        }.start()
 
         stopForeground(true)
         stopSelf()
