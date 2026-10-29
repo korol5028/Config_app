@@ -1,7 +1,10 @@
 package com.example.configapp.ui
 
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
@@ -36,26 +39,46 @@ import com.example.configapp.data.ProxyConfig
 fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
     val configs by viewModel.configs.collectAsState()
     val subInfo by viewModel.subInfo.collectAsState()
-    val pingResults by viewModel.pingResults.collectAsState()
-    var isConnected by remember { mutableStateOf(false) }
     
+    var isConnected by remember { mutableStateOf(false) }
     var selectedConfig by remember { mutableStateOf<ProxyConfig?>(null) }
+    val context = LocalContext.current
+
+    // Слушаем состояние сервиса
+    DisposableEffect(Unit) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                when (intent?.getStringExtra(VeloxVpnService.EXTRA_STATE)) {
+                    VeloxVpnService.STATE_CONNECTED -> isConnected = true
+                    VeloxVpnService.STATE_DISCONNECTED -> isConnected = false
+                    VeloxVpnService.STATE_ERROR -> {
+                        isConnected = false
+                        val error = intent.getStringExtra(VeloxVpnService.EXTRA_ERROR)
+                        Toast.makeText(context, error ?: "Ошибка VPN", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter(VeloxVpnService.ACTION_VPN_STATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(receiver, filter)
+        }
+        onDispose { context.unregisterReceiver(receiver) }
+    }
+
     LaunchedEffect(configs) {
         if (selectedConfig == null && configs.isNotEmpty()) {
             selectedConfig = configs.first()
         }
     }
 
-    val context = LocalContext.current
-
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
             startVpnService(context, selectedConfig!!.rawLink)
-            isConnected = true
-        } else {
-            Toast.makeText(context, "Без уведомлений VPN не сможет работать", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -66,16 +89,12 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
                     startVpnService(context, selectedConfig!!.rawLink)
-                    isConnected = true
                 } else {
                     notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 }
             } else {
                 startVpnService(context, selectedConfig!!.rawLink)
-                isConnected = true
             }
-        } else {
-            isConnected = false
         }
     }
 
@@ -103,7 +122,6 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
                             if (isConnected) {
                                 val intent = Intent(context, VeloxVpnService::class.java).apply { action = "STOP" }
                                 context.startService(intent)
-                                isConnected = false
                             } else {
                                 if (selectedConfig == null) {
                                     Toast.makeText(context, "Сначала добавьте сервер", Toast.LENGTH_SHORT).show()
@@ -116,13 +134,11 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                         if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
                                             startVpnService(context, selectedConfig!!.rawLink)
-                                            isConnected = true
                                         } else {
                                             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                                         }
                                     } else {
                                         startVpnService(context, selectedConfig!!.rawLink)
-                                        isConnected = true
                                     }
                                 }
                             }
@@ -147,7 +163,6 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
                     theme = theme,
                     subInfo = subInfo,
                     isFirstInList = cfg.id == configs.firstOrNull()?.id,
-                    ping = pingResults[cfg.id], // ПЕРЕДАЕМ ПИНГ
                     onClick = { selectedConfig = cfg },
                     onDelete = { viewModel.delete(cfg) }
                 )
@@ -157,7 +172,7 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
 }
 
 @Composable
-fun SubscriptionCard(cfg: ProxyConfig, isSelected: Boolean, theme: AppTheme, subInfo: SubInfo?, isFirstInList: Boolean, ping: Int?, onClick: () -> Unit, onDelete: () -> Unit) {
+fun SubscriptionCard(cfg: ProxyConfig, isSelected: Boolean, theme: AppTheme, subInfo: SubInfo?, isFirstInList: Boolean, onClick: () -> Unit, onDelete: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth().clickable { onClick() },
         colors = CardDefaults.cardColors(containerColor = if (isSelected) theme.selectedCardBg else theme.cardBg),
@@ -171,23 +186,6 @@ fun SubscriptionCard(cfg: ProxyConfig, isSelected: Boolean, theme: AppTheme, sub
                     Text(cfg.name, color = theme.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     Text("Автообновление: вкл.", color = theme.textGray, fontSize = 11.sp)
                 }
-                
-                // СТАТУС ПИНГА
-                val pingColor = when {
-                    ping == null -> theme.textGray
-                    ping == -1 -> Color.Red
-                    else -> Color(0xFF4CAF50)
-                }
-                Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(pingColor))
-                
-                if (ping != null && ping != -1) {
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("${ping}ms", color = theme.textGray, fontSize = 12.sp)
-                }
-                
-                Spacer(modifier = Modifier.width(12.dp))
-                
-                // ИКОНКА КОРЗИНЫ
                 Icon(
                     Icons.Default.Delete, 
                     contentDescription = "Удалить", 
