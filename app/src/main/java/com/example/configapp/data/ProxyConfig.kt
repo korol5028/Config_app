@@ -10,4 +10,4 @@ data class ProxyConfig(
     val extra: Map<String, String> = emptyMap()
 )
 
-enum class Protocol { VLESS, VMESS, TROJAN, SHADOWSOCKS }
+enum class Protocol { VLESS, VMESS, TROJAN, SHADOWSOCKS, HYSTERIA2 }
