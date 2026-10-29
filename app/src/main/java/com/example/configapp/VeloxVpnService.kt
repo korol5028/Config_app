@@ -165,7 +165,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         return 0
     }
 
-    // ИСПРАВЛЕНО: Первый параметр теперь Long, как требует библиотека
     override fun onEmitStatus(l: Long, s: String?): Long {
         Log.w("VeloxVPN", "Статус ядра: code=$l, msg=$s")
         if (l != 0L) {
@@ -398,19 +397,23 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     }
 
     private fun stopVpn(errorMsg: String?) {
-        if (!isRunning.get() && !isStarting.get()) return
         isRunning.set(false)
         coreStarted.countDown()
 
-        try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
-        tunnelThread?.interrupt()
+        val pfd = vpnInterface
+        vpnInterface = null
+        val ctrl = coreController
+        coreController = null
+        val thread = tunnelThread
         tunnelThread = null
 
-        try { coreController?.stopLoop() } catch (e: Throwable) {}
-        coreController = null
-
-        vpnInterface?.close()
-        vpnInterface = null
+        // Выносим остановку JNI в отдельный поток, чтобы не вешать UI
+        Thread {
+            try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
+            thread?.interrupt()
+            try { ctrl?.stopLoop() } catch (e: Throwable) {}
+            try { pfd?.close() } catch (e: Throwable) {}
+        }.start()
 
         if (errorMsg != null) {
             sendStateBroadcast(STATE_ERROR, errorMsg)
