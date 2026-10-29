@@ -96,7 +96,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             coreController = Libv2ray.newCoreController(this)
             coreController?.startLoop(xrayJsonConfig, tunFd)
             
-            TimeUnit.MILLISECONDS.sleep(1000) // Ждем Xray
+            TimeUnit.MILLISECONDS.sleep(1000)
 
             val configFile = File(filesDir, "hev_config.yaml")
             configFile.writeText(buildHevYaml(configFile.absolutePath))
@@ -110,7 +110,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             }.apply { isDaemon = true }
             tunnelThread?.start()
             
-            // СООБЩАЕМ UI, ЧТО ВСЕ РЕАЛЬНО ЗАРАБОТАЛО
             sendStateBroadcast(STATE_CONNECTED, null)
             
         } catch (e: Throwable) {
@@ -214,21 +213,22 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         var body = link.removePrefix("ss://")
         if (body.contains("#")) body = body.substringBefore("#")
         body = body.substringBefore("?")
-        val userInfo = body.substringBefore("@")
-        val hostPort = body.substringAfter("@")
+        val at = body.lastIndexOf('@')
+        val userInfo = body.substring(0, at)
+        val hostPort = body.substring(at + 1)
+        
         var method = ""
         var password = ""
-        val decodedUserInfo = try {
-            String(Base64.decode(userInfo.replace('-', '+').replace('_', '/'), Base64.DEFAULT), Charsets.UTF_8)
-        } catch (e: Exception) { userInfo }
-
-        if (decodedUserInfo.contains(":")) {
-            method = decodedUserInfo.substringBefore(":")
-            password = decodedUserInfo.substringAfter(":")
-        } else {
+        val decoded = try { String(Base64.decode(userInfo.replace('-', '+').replace('_', '/'), Base64.DEFAULT), Charsets.UTF_8) } catch (e: Exception) { userInfo }
+        
+        if (decoded.contains(":")) {
+            method = decoded.substringBefore(":")
+            password = decoded.substringAfter(":")
+        } else if (userInfo.contains(":")) {
             method = userInfo.substringBefore(":")
             password = userInfo.substringAfter(":")
         }
+
         outbound.put("protocol", "shadowsocks")
         val servers = JSONArray()
         val server = JSONObject()
