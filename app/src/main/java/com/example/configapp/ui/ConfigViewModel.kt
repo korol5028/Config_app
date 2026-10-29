@@ -79,14 +79,11 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
         return withContext(Dispatchers.IO) {
             try {
                 val request = Request.Builder().url(url).header("User-Agent", "v2rayNG/1.8.5").build()
-                
                 httpClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@withContext Triple(emptyList(), "Ошибка сети: ${response.code}", null)
                     
                     val contentLength = response.body?.contentLength() ?: 0L
-                    if (contentLength > 5 * 1024 * 1024) {
-                        return@withContext Triple(emptyList(), "Файл слишком большой", null)
-                    }
+                    if (contentLength > 5 * 1024 * 1024) return@withContext Triple(emptyList(), "Файл слишком большой", null)
 
                     val title = response.header("profile-title") ?: "Подписка"
                     val userInfoStr = response.header("subscription-userinfo")
@@ -102,10 +99,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                             if (part.startsWith("total=")) total = part.substringAfter("=").toLongOrNull() ?: 0
                             if (part.startsWith("expire=")) expireTime = part.substringAfter("=").toLongOrNull() ?: 0
                         }
-                        if (expireTime > 0) {
-                            val date = Date(expireTime * 1000)
-                            expireStr = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault()).format(date)
-                        }
+                        if (expireTime > 0) expireStr = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault()).format(Date(expireTime * 1000))
                         if (total > 0) trafficStr = "${formatBytes(download)} / ${formatBytes(total)}"
                     }
 
@@ -115,9 +109,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                     var safeBody: String = body!!.trim()
 
                     if (!safeBody.contains("://")) {
-                        try {
-                            safeBody = decodeBase64Safe(safeBody)
-                        } catch (e: Exception) {}
+                        try { safeBody = decodeBase64Safe(safeBody) } catch (e: Exception) {}
                     }
                     Triple(parseRawText(safeBody), "OK", subInfo)
                 }
@@ -129,13 +121,9 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
 
     @OptIn(ExperimentalEncodingApi::class)
     private fun decodeBase64Safe(str: String): String {
-        val cleanBase64 = str.replace('-', '+').replace('_', '/').replace("\n", "").replace("\r", "")
-        val padded = when (cleanBase64.length % 4) { 2 -> "$cleanBase64=="; 3 -> "$cleanBase64="; else -> cleanBase64 }
-        val decodedBytes = try {
-            Base64.UrlSafe.decode(padded)
-        } catch (e: Exception) {
-            Base64.Default.decode(padded)
-        }
+        val clean = str.replace('-', '+').replace('_', '/').replace("\n", "").replace("\r", "")
+        val padded = when (clean.length % 4) { 2 -> "$clean=="; 3 -> "$clean="; else -> clean }
+        val decodedBytes = try { Base64.UrlSafe.decode(padded) } catch (e: Exception) { Base64.Default.decode(padded) }
         return decodedBytes.decodeToString()
     }
 
