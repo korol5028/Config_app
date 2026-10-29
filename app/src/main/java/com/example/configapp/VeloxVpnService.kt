@@ -165,10 +165,11 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         return 0
     }
 
-    override fun onEmitStatus(code: Int, msg: String?): Long {
-        Log.w("VeloxVPN", "Статус ядра: code=$code, msg=$msg")
-        if (code != 0) {
-            coreError.compareAndSet(null, "Ошибка ядра: $msg (code=$code)")
+    // ИСПРАВЛЕНО: Первый параметр теперь Long, как требует библиотека
+    override fun onEmitStatus(l: Long, s: String?): Long {
+        Log.w("VeloxVPN", "Статус ядра: code=$l, msg=$s")
+        if (l != 0L) {
+            coreError.compareAndSet(null, "Ошибка ядра: $s (code=$l)")
             coreStarted.countDown()
         }
         return 0
