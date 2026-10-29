@@ -48,7 +48,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
 
         if (isStarting.getAndSet(true)) {
-            Log.w("VeloxVPN", "Уже запускается, игнорируем")
+            Log.w("VeloxVPN", "Уже запускается, игнорируем дубликат")
             return START_STICKY
         }
 
@@ -100,7 +100,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 return
             }
 
-            // 1. Запускаем Xray в фоне (БЕЗ ОЖИДАНИЯ)
+            // 1. Запускаем Xray в фоне (без блокирующего ожидания)
             coreController = Libv2ray.newCoreController(this)
             Thread {
                 try {
@@ -111,7 +111,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 }
             }.start()
 
-            // 2. Ждем ровно 300 мс, чтобы Xray открыл порт, и запускаем мост
+            // 2. Ждем ровно 300 мс, чтобы Xray поднял порт 10808, и запускаем мост
             TimeUnit.MILLISECONDS.sleep(300)
 
             val yaml = buildHevYaml(filesDir.absolutePath + "/hev.log")
@@ -211,6 +211,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
             return root.toString(2)
         } catch (e: Throwable) {
+            Log.e("VeloxVPN", "Ошибка сборки конфига: ${e.message}")
             return null
         }
     }
@@ -319,21 +320,34 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         outbound.put("streamSettings", stream)
     }
 
+    // ОБНОВЛЕННЫЙ TROJAN (с fingerprint и allowInsecure)
     private fun buildTrojanOutbound(link: String, outbound: JSONObject) {
         val uri = Uri.parse(link)
+        val password = uri.userInfo ?: return
+        val host = uri.host ?: return
+        val port = if (uri.port != -1) uri.port else 443
+        val sni = uri.getQueryParameter("sni") ?: host
+
         outbound.put("protocol", "trojan")
         val servers = JSONArray()
         val server = JSONObject()
-        server.put("address", uri.host)
-        server.put("port", uri.port)
-        server.put("password", uri.userInfo)
+        server.put("address", host)
+        server.put("port", port)
+        server.put("password", password)
         server.put("level", 0)
         servers.put(server)
         outbound.put("settings", JSONObject().put("servers", servers))
+
         val stream = JSONObject()
         stream.put("network", "tcp")
         stream.put("security", "tls")
-        stream.put("tlsSettings", JSONObject().put("serverName", uri.getQueryParameter("sni") ?: uri.host))
+        
+        val tls = JSONObject()
+        tls.put("serverName", sni)
+        tls.put("allowInsecure", false)
+        tls.put("fingerprint", "chrome") 
+        
+        stream.put("tlsSettings", tls)
         outbound.put("streamSettings", stream)
     }
 
@@ -355,7 +369,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
     private fun stopVpn(errorMsg: String?) {
         isRunning.set(false)
-        
+
         val pfd = vpnInterface
         vpnInterface = null
         val ctrl = coreController
@@ -363,6 +377,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val thread = tunnelThread
         tunnelThread = null
 
+        // Выносим остановку JNI в отдельный поток, чтобы не вешать UI
         Thread {
             try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
             thread?.interrupt()
