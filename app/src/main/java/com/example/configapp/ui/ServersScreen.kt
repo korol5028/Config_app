@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -33,9 +32,6 @@ fun ServersScreen(
     onAddClick: (String) -> Unit
 ) {
     val configs by viewModel.configs.collectAsState()
-    val pingResults by viewModel.pingResults.collectAsState()
-    val isPinging by viewModel.isPinging.collectAsState()
-    
     var searchQuery by remember { mutableStateOf("") }
     var selectedProtocol by remember { mutableStateOf<Protocol?>(null) }
     
@@ -59,16 +55,6 @@ fun ServersScreen(
             Column {
                 Text("Мои сервера", color = theme.text, fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Text("${configs.size} конфигов", color = theme.textGray, fontSize = 13.sp)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // Кнопка ПИНГА
-                IconButton(onClick = { viewModel.pingAllServers() }, modifier = Modifier.background(theme.cardBg, CircleShape), enabled = !isPinging) {
-                    if (isPinging) {
-                        CircularProgressIndicator(modifier = Modifier.size(20.dp), color = theme.accent, strokeWidth = 2.dp)
-                    } else {
-                        Icon(Icons.Default.Speed, contentDescription = "Пинг", tint = theme.accent)
-                    }
-                }
             }
         }
 
@@ -131,10 +117,9 @@ fun ServersScreen(
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 100.dp)) {
                 items(filteredConfigs) { config ->
-                    PingedServerCard(
+                    ServerCardItem(
                         cfg = config, 
                         theme = theme, 
-                        ping = pingResults[config.id],
                         onDelete = { viewModel.delete(config) }
                     )
                 }
@@ -144,13 +129,7 @@ fun ServersScreen(
 }
 
 @Composable
-fun PingedServerCard(cfg: ProxyConfig, theme: AppTheme, ping: Int?, onDelete: () -> Unit) {
-    val statusColor = when {
-        ping == null -> theme.textGray
-        ping == -1 -> Color.Red
-        else -> Color(0xFF4CAF50)
-    }
-
+fun ServerCardItem(cfg: ProxyConfig, theme: AppTheme, onDelete: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(theme.cardBg).padding(16.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -164,17 +143,6 @@ fun PingedServerCard(cfg: ProxyConfig, theme: AppTheme, ping: Int?, onDelete: ()
             Text("${cfg.protocol.name} · ${cfg.host}", color = theme.textGray, fontSize = 12.sp)
         }
         
-        // Кружок пинга
-        Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(statusColor))
-        
-        if (ping != null && ping != -1) {
-            Spacer(modifier = Modifier.width(4.dp))
-            Text("${ping}ms", color = theme.textGray, fontSize = 12.sp)
-        }
-        
-        Spacer(modifier = Modifier.width(12.dp))
-        
-        // Кнопка удаления (Мусорка)
         Icon(
             Icons.Default.Delete, 
             contentDescription = "Удалить", 
