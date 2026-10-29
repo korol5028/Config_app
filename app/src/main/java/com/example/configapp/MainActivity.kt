@@ -1,6 +1,10 @@
 package com.example.configapp
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -17,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -26,22 +31,17 @@ import com.example.configapp.ui.*
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        // Получаем доступ к сохраненным настройкам
         val prefs = getSharedPreferences("velox_prefs", Context.MODE_PRIVATE)
         val savedThemeName = prefs.getString("app_theme", "Индиго") ?: "Индиго"
         val initialTheme = getThemeByName(savedThemeName)
 
         setContent {
-            // Устанавливаем тему, которая была сохранена
             var currentTheme by remember { mutableStateOf(initialTheme) }
-
             MaterialTheme(colorScheme = darkColorScheme(background = currentTheme.bg)) {
                 App(
                     currentTheme = currentTheme, 
                     onThemeChange = { newTheme -> 
                         currentTheme = newTheme
-                        // СОХРАНЯЕМ выбранную тему в память телефона
                         prefs.edit().putString("app_theme", newTheme.name).apply() 
                     }
                 )
@@ -50,7 +50,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// Вспомогательная функция, чтобы понимать, какую тему загружать
 fun getThemeByName(name: String): AppTheme {
     return when (name) {
         "Зелёная" -> GreenTheme
@@ -70,6 +69,29 @@ fun App(
     var selectedTab by remember { mutableIntStateOf(0) }
     var showImport by remember { mutableStateOf(false) }
     var importText by remember { mutableStateOf("") }
+    
+    // ГЛОБАЛЬНОЕ СОСТОЯНИЕ ПОДКЛЮЧЕНИЯ (теперь не сбрасывается при переходе по вкладкам)
+    var isVpnConnected by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    DisposableEffect(Unit) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                when (intent?.getStringExtra(VeloxVpnService.EXTRA_STATE)) {
+                    VeloxVpnService.STATE_CONNECTED -> isVpnConnected = true
+                    VeloxVpnService.STATE_DISCONNECTED -> isVpnConnected = false
+                    VeloxVpnService.STATE_ERROR -> isVpnConnected = false
+                }
+            }
+        }
+        val filter = IntentFilter(VeloxVpnService.ACTION_VPN_STATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(receiver, filter)
+        }
+        onDispose { context.unregisterReceiver(receiver) }
+    }
 
     Scaffold(
         containerColor = currentTheme.bg,
@@ -79,7 +101,12 @@ fun App(
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
             when (selectedTab) {
-                0 -> ConfigScreen(viewModel = vm, theme = currentTheme)
+                0 -> ConfigScreen(
+                    viewModel = vm, 
+                    theme = currentTheme, 
+                    isConnected = isVpnConnected,
+                    onToggleConnection = { isVpnConnected = it }
+                )
                 1 -> ServersScreen(
                     viewModel = vm, 
                     theme = currentTheme, 
