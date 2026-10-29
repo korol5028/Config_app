@@ -13,20 +13,17 @@ import android.util.Base64
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
-import hev.sockstun.TProxyService
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.util.concurrent.TimeUnit
 
 class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var isRunning = false
     private var coreController: CoreController? = null
-    private var tunnelThread: Thread? = null
 
     companion object {
         const val ACTION_VPN_STATE = "com.example.configapp.VPN_STATE"
@@ -94,21 +91,18 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             }
 
             coreController = Libv2ray.newCoreController(this)
-            coreController?.startLoop(xrayJsonConfig, tunFd)
             
-            TimeUnit.MILLISECONDS.sleep(1000)
-
-            val configFile = File(filesDir, "hev_config.yaml")
-            configFile.writeText(buildHevYaml(configFile.absolutePath))
-
-            tunnelThread = Thread {
+            // Запускаем ядро Xray (он сам будет читать из TUN)
+            Thread {
                 try {
-                    TProxyService.TProxyStartService(configFile.absolutePath, tunFd)
+                    coreController?.startLoop(xrayJsonConfig, tunFd)
                 } catch (e: Throwable) {
-                    Log.e("VeloxVPN", "Tunnel thread error: ${e.message}")
+                    Log.e("VeloxVPN", "Core crashed: ${e.message}")
                 }
-            }.apply { isDaemon = true }
-            tunnelThread?.start()
+            }.start()
+            
+            // Ждем, чтобы Xray поднялся
+            TimeUnit.MILLISECONDS.sleep(1500)
             
             sendStateBroadcast(STATE_CONNECTED, null)
             
@@ -126,22 +120,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         sendBroadcast(intent)
     }
 
-    private fun buildHevYaml(logPath: String): String {
-        return """
-            tunnel:
-              ipv4: 10.255.0.2
-              mtu: 1500
-            socks5:
-              address: 127.0.0.1
-              port: 10808
-              udp: 'udp'
-            misc:
-              log-file: $logPath
-              log-level: debug
-              task-stack-size: 81920
-        """.trimIndent()
-    }
-
     override fun startup(): Long = 0
     override fun shutdown(): Long = 0
     override fun onEmitStatus(l: Long, s: String?): Long = 0
@@ -150,15 +128,25 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         try {
             val root = JSONObject()
             root.put("log", JSONObject().put("loglevel", "warning"))
+            
+            // DNS сервера
+            val dns = JSONObject()
+            dns.put("servers", JSONArray().put("1.1.1.1").put("8.8.8.8"))
+            root.put("dns", dns)
+
+            // Входящее соединение (SOCKS)
             val inbounds = JSONArray()
             val inbound = JSONObject()
             inbound.put("port", 10808)
             inbound.put("listen", "127.0.0.1")
             inbound.put("protocol", "socks")
-            inbound.put("settings", JSONObject().put("auth", "noauth"))
+            val settings = JSONObject()
+            settings.put("udp", true)
+            inbound.put("settings", settings)
             inbounds.put(inbound)
             root.put("inbounds", inbounds)
 
+            // Исходящее соединение (твой сервер)
             val outbounds = JSONArray()
             val outbound = JSONObject()
 
@@ -172,9 +160,29 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             }
 
             outbounds.put(outbound)
+            
+            // Прямое подключение для локальной сети (чтобы не было петель)
+            outbounds.put(JSONObject().put("protocol", "freedom").put("tag", "direct"))
+            outbounds.put(JSONObject().put("protocol", "blackhole").put("tag", "block"))
             root.put("outbounds", outbounds)
+
+            // Маршрутизация (без geoip, чтобы не искать файлы)
+            val routing = JSONObject()
+            val rules = JSONArray()
+            val rule = JSONObject()
+            rule.put("type", "field")
+            // Явно указываем локальные IP-адреса
+            rule.put("ip", JSONArray().put("10.0.0.0/8").put("172.16.0.0/12").put("192.168.0.0/16").put("127.0.0.0/8"))
+            rule.put("outboundTag", "direct")
+            rules.put(rule)
+            routing.put("rules", rules)
+            root.put("routing", routing)
+
             return root.toString(2)
-        } catch (e: Throwable) { return null }
+        } catch (e: Throwable) { 
+            Log.e("VeloxVPN", "Config build error: ${e.message}")
+            return null 
+        }
     }
 
     private fun buildVlessOutbound(link: String, outbound: JSONObject) {
@@ -301,9 +309,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     }
 
     private fun stopVpn(errorMsg: String?) {
-        try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
-        tunnelThread?.interrupt()
-        tunnelThread = null
         try { coreController?.stopLoop() } catch (e: Throwable) {}
         coreController = null
         vpnInterface?.close()
