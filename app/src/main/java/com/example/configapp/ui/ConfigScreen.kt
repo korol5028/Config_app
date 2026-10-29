@@ -44,7 +44,6 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
     var selectedConfig by remember { mutableStateOf<ProxyConfig?>(null) }
     val context = LocalContext.current
 
-    // Слушаем состояние сервиса
     DisposableEffect(Unit) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -98,14 +97,8 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
         }
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize().background(theme.bg).padding(horizontal = 16.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 24.dp),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+    Column(modifier = Modifier.fillMaxSize().background(theme.bg).padding(horizontal = 16.dp)) {
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 24.dp), horizontalArrangement = Arrangement.End) {
             Icon(Icons.Default.Settings, contentDescription = "Настройки", tint = theme.textGray)
         }
 
@@ -186,12 +179,7 @@ fun SubscriptionCard(cfg: ProxyConfig, isSelected: Boolean, theme: AppTheme, sub
                     Text(cfg.name, color = theme.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     Text("Автообновление: вкл.", color = theme.textGray, fontSize = 11.sp)
                 }
-                Icon(
-                    Icons.Default.Delete, 
-                    contentDescription = "Удалить", 
-                    tint = theme.textGray, 
-                    modifier = Modifier.clickable { onDelete() }
-                )
+                Icon(Icons.Default.Delete, contentDescription = "Удалить", tint = theme.textGray, modifier = Modifier.clickable { onDelete() })
             }
 
             if (isSelected && isFirstInList && subInfo != null) {
@@ -212,8 +200,6 @@ fun SubscriptionCard(cfg: ProxyConfig, isSelected: Boolean, theme: AppTheme, sub
 }
 
 fun startVpnService(context: android.content.Context, configLink: String) {
-    val intent = Intent(context, VeloxVpnService::class.java).apply {
-        putExtra("CONFIG_JSON", configLink)
-    }
+    val intent = Intent(context, VeloxVpnService::class.java).apply { putExtra("CONFIG_JSON", configLink) }
     ContextCompat.startForegroundService(context, intent)
 }
