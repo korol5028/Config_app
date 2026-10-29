@@ -1,10 +1,7 @@
 package com.example.configapp.ui
 
 import android.Manifest
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
@@ -36,36 +33,17 @@ import com.example.configapp.VeloxVpnService
 import com.example.configapp.data.ProxyConfig
 
 @Composable
-fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
+fun ConfigScreen(
+    viewModel: ConfigViewModel, 
+    theme: AppTheme,
+    isConnected: Boolean,
+    onToggleConnection: (Boolean) -> Unit
+) {
     val configs by viewModel.configs.collectAsState()
     val subInfo by viewModel.subInfo.collectAsState()
     
-    var isConnected by remember { mutableStateOf(false) }
     var selectedConfig by remember { mutableStateOf<ProxyConfig?>(null) }
     val context = LocalContext.current
-
-    DisposableEffect(Unit) {
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(ctx: Context?, intent: Intent?) {
-                when (intent?.getStringExtra(VeloxVpnService.EXTRA_STATE)) {
-                    VeloxVpnService.STATE_CONNECTED -> isConnected = true
-                    VeloxVpnService.STATE_DISCONNECTED -> isConnected = false
-                    VeloxVpnService.STATE_ERROR -> {
-                        isConnected = false
-                        val error = intent.getStringExtra(VeloxVpnService.EXTRA_ERROR)
-                        Toast.makeText(context, error ?: "Ошибка VPN", Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
-        }
-        val filter = IntentFilter(VeloxVpnService.ACTION_VPN_STATE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            context.registerReceiver(receiver, filter)
-        }
-        onDispose { context.unregisterReceiver(receiver) }
-    }
 
     LaunchedEffect(configs) {
         if (selectedConfig == null && configs.isNotEmpty()) {
@@ -115,6 +93,7 @@ fun ConfigScreen(viewModel: ConfigViewModel, theme: AppTheme) {
                             if (isConnected) {
                                 val intent = Intent(context, VeloxVpnService::class.java).apply { action = "STOP" }
                                 context.startService(intent)
+                                onToggleConnection(false)
                             } else {
                                 if (selectedConfig == null) {
                                     Toast.makeText(context, "Сначала добавьте сервер", Toast.LENGTH_SHORT).show()
