@@ -15,6 +15,7 @@ object ConfigParser {
             trimmed.startsWith("vmess://", true) -> parseVmess(trimmed)
             trimmed.startsWith("trojan://", true) -> parseTrojan(trimmed)
             trimmed.startsWith("ss://", true) -> parseShadowsocks(trimmed)
+            trimmed.startsWith("hysteria2://", true) || trimmed.startsWith("hy2://", true) -> parseHysteria2(trimmed)
             else -> null
         }
     }
@@ -57,25 +58,39 @@ object ConfigParser {
 
     private fun parseShadowsocks(link: String): ProxyConfig? {
         return try {
-            val body = link.removePrefix("ss://")
-            val hashIdx = body.indexOf('#')
-            val name = if (hashIdx >= 0) decode(body.substring(hashIdx + 1)) else "Shadowsocks"
-            val main = if (hashIdx >= 0) body.substring(0, hashIdx) else body
-
-            val (host, port, method, password) = if (main.contains('@')) {
-                val at = main.lastIndexOf('@')
-                val decoded = decodeBase64(main.substring(0, at)) ?: return null
-                if (!decoded.contains(':')) return null
-                val hp = splitHostPort(main.substring(at + 1)) ?: return null
-                Quad(hp.first, hp.second, decoded.substringBefore(':'), decoded.substringAfter(':'))
-            } else {
-                val decoded = decodeBase64(main) ?: return null
-                val at = decoded.lastIndexOf('@')
-                if (at < 0) return null
-                val creds = decoded.substring(0, at)
-                val hp = splitHostPort(decoded.substring(at + 1)) ?: return null
-                Quad(hp.first, hp.second, creds.substringBefore(':'), creds.substringAfter(':', ""))
+            var body = link.removePrefix("ss://")
+            var name = "Shadowsocks"
+            if (body.contains("#")) {
+                name = decode(body.substringAfter("#"))
+                body = body.substringBefore("#")
             }
+            body = body.substringBefore("?")
+
+            val atIdx = body.lastIndexOf('@')
+            if (atIdx < 0) return null
+            
+            val userInfo = body.substring(0, atIdx)
+            val hostPort = body.substring(atIdx + 1)
+
+            var method = ""
+            var password = ""
+
+            // Пробуем декодировать Base64
+            val decodedUserInfo = decodeBase64(userInfo)
+            
+            if (decodedUserInfo != null && decodedUserInfo.contains(":")) {
+                method = decodedUserInfo.substringBefore(":")
+                password = decodedUserInfo.substringAfter(":")
+            } else if (userInfo.contains(":")) {
+                // Если не Base64, значит открытый текст (твой случай)
+                method = decode(userInfo.substringBefore(":"))
+                password = decode(userInfo.substringAfter(":"))
+            } else {
+                return null
+            }
+
+            val (host, port) = splitHostPort(hostPort) ?: return null
+
             ProxyConfig(UUID.randomUUID().toString(), name, Protocol.SHADOWSOCKS,
                 host, port, link, mapOf("method" to method, "password" to password))
         } catch (e: Exception) { null }
@@ -106,9 +121,23 @@ object ConfigParser {
             )
         } catch (e: Exception) { null }
     }
-
-    private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
     
+    private fun parseHysteria2(link: String): ProxyConfig? {
+        return try {
+            val body = link.removePrefix("hysteria2://").removePrefix("hy2://")
+            val hashIdx = body.indexOf('#')
+            val name = if (hashIdx >= 0) decode(body.substring(hashIdx + 1)) else "Hysteria2"
+            val main = if (hashIdx >= 0) body.substring(0, hashIdx) else body
+            val qIdx = main.indexOf('?')
+            val hostPart = if (qIdx >= 0) main.substring(0, qIdx) else main
+            val atIdx = hostPart.lastIndexOf('@')
+            if (atIdx < 0) return null
+            val auth = hostPart.substring(0, atIdx)
+            val (host, port) = splitHostPort(hostPart.substring(atIdx + 1)) ?: return null
+            ProxyConfig(UUID.randomUUID().toString(), name, Protocol.HYSTERIA2, host, port, link, mapOf("auth" to auth))
+        } catch (e: Exception) { null }
+    }
+
     private fun splitHostPort(hostPort: String): Pair<String, Int>? {
         val s = hostPort.trim()
         if (s.isEmpty()) return null
@@ -138,11 +167,7 @@ object ConfigParser {
     private fun decodeBase64(s: String): String? = try {
         val n = s.trim().replace("\n", "").replace("\r", "")
         val padded = when (n.length % 4) { 2 -> "$n=="; 3 -> "$n="; else -> n }
-        val decodedBytes = try {
-            Base64.UrlSafe.decode(padded)
-        } catch (e: Exception) {
-            Base64.Default.decode(padded)
-        }
+        val decodedBytes = try { Base64.UrlSafe.decode(padded) } catch (e: Exception) { Base64.Default.decode(padded) }
         decodedBytes.decodeToString()
     } catch (e: Exception) { null }
 }
