@@ -13,19 +13,20 @@ import android.util.Base64
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
-import com.zaneschepke.tunnel.Tunnel
+import hev.sockstun.TProxyService
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var isRunning = false
     private var coreController: CoreController? = null
-    private var tunnel: Tunnel? = null
+    private var tunnelThread: Thread? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP") {
@@ -95,12 +96,24 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             coreController?.startLoop(xrayJsonConfig, tunFd)
             Log.d("VeloxVPN", "Xray started successfully!")
 
-            // 3. Ждем секунду, чтобы Xray поднял порт 10808
+            // 3. Ждем, чтобы Xray поднял порт 10808
             TimeUnit.MILLISECONDS.sleep(1000)
 
-            // 4. Запускаем tun2socks (мост)
-            tunnel = Tunnel()
-            tunnel?.start(tunFd, "127.0.0.1", 10808, 1500)
+            // 4. Запускаем tun2socks (мост) через TProxyService
+            val configFile = File(filesDir, "hev_config.yaml")
+            configFile.writeText(buildHevYaml(configFile.absolutePath))
+
+            tunnelThread = Thread {
+                try {
+                    Log.d("VeloxVPN", "TProxyStartService(fd=$tunFd, cfg=${configFile.absolutePath})")
+                    // Передаем НЕ detachFd, а именно fd
+                    TProxyService.TProxyStartService(configFile.absolutePath, tunFd)
+                } catch (e: Throwable) {
+                    Log.e("VeloxVPN", "Tunnel thread error: ${e.message}")
+                }
+            }.apply { isDaemon = true }
+            tunnelThread?.start()
+            
             Log.d("VeloxVPN", "Tunnel started successfully!")
             
         } catch (e: Throwable) {
@@ -108,6 +121,23 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             showToast("Ошибка запуска: ${e.message}")
             stopVpn()
         }
+    }
+
+    private fun buildHevYaml(logPath: String): String {
+        // Важно: отступы двумя пробелами, LF, без лишних пробелов
+        return """
+            tunnel:
+              ipv4: 172.19.0.1
+              mtu: 1500
+            socks5:
+              address: 127.0.0.1
+              port: 10808
+              udp: 'udp'
+            misc:
+              log-file: $logPath
+              log-level: debug
+              task-stack-size: 81920
+        """.trimIndent()
     }
 
     private fun showToast(msg: String) {
@@ -289,8 +319,9 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     }
 
     private fun stopVpn() {
-        try { tunnel?.stop() } catch (e: Throwable) {}
-        tunnel = null
+        try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
+        tunnelThread?.interrupt()
+        tunnelThread = null
         try { coreController?.stopLoop() } catch (e: Throwable) {}
         coreController = null
         vpnInterface?.close()
