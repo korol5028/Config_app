@@ -40,9 +40,12 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
-    // Библиотека для скачивания подписок
+    // OkHttp для скачивания подписок
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // Локальный файл Xray
+    // Наш движок Xray (локальный файл)
     implementation(files("libs/libv2ray.aar"))
+
+    // Мост TUN -> SOCKS5 (tun2socks)
+    implementation("com.zaneschepke:hevtunnel:1.0.1")
 }
