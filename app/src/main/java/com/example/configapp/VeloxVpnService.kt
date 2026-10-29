@@ -246,6 +246,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             reality.put("publicKey", uri.getQueryParameter("pbk") ?: "")
             reality.put("shortId", uri.getQueryParameter("sid") ?: "")
             reality.put("fingerprint", uri.getQueryParameter("fp") ?: "chrome")
+            reality.put("spiderX", "/")
             stream.put("realitySettings", reality)
         }
         outbound.put("streamSettings", stream)
