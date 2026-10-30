@@ -1,16 +1,21 @@
 package com.example.configapp.data
 
 import android.content.Context
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 class ConfigRepository(context: Context) {
-    private val prefs = context.applicationContext
-        .getSharedPreferences("configs", Context.MODE_PRIVATE)
+    // Сохраняем в обычный файл, а не в SharedPreferences
+    private val configFile = File(context.filesDir, "velox_configs.json")
 
-    fun loadAll(): List<ProxyConfig> {
-        val raw = prefs.getString(KEY, null) ?: return emptyList()
-        return try {
+    // Загрузка (вызывать только из корутины/фонового потока)
+    suspend fun loadAll(): List<ProxyConfig> = withContext(Dispatchers.IO) {
+        if (!configFile.exists()) return@withContext emptyList()
+        return@withContext try {
+            val raw = configFile.readText()
             val arr = JSONArray(raw)
             (0 until arr.length()).mapNotNull { i ->
                 try {
@@ -26,26 +31,31 @@ class ConfigRepository(context: Context) {
                     )
                 } catch (e: Exception) { null }
             }
-        } catch (e: Exception) { emptyList() }
+        } catch (e: Exception) {
+            emptyList()
+        }
     }
 
-    fun saveAll(items: List<ProxyConfig>) {
-        val arr = JSONArray()
-        items.forEach { c ->
-            arr.put(JSONObject().apply {
-                put("id", c.id); put("name", c.name)
-                put("protocol", c.protocol.name)
-                put("host", c.host); put("port", c.port)
-                put("rawLink", c.rawLink)
-                put("extra", JSONObject().apply { c.extra.forEach { (k, v) -> put(k, v) } })
-            })
+    // Сохранение (в фоне)
+    suspend fun saveAll(items: List<ProxyConfig>) = withContext(Dispatchers.IO) {
+        try {
+            val arr = JSONArray()
+            items.forEach { c ->
+                arr.put(JSONObject().apply {
+                    put("id", c.id); put("name", c.name)
+                    put("protocol", c.protocol.name)
+                    put("host", c.host); put("port", c.port)
+                    put("rawLink", c.rawLink)
+                    put("extra", JSONObject().apply { c.extra.forEach { (k, v) -> put(k, v) } })
+                })
+            }
+            configFile.writeText(arr.toString())
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
-        prefs.edit().putString(KEY, arr.toString()).apply()
     }
 
     private fun toMap(o: JSONObject) = mutableMapOf<String, String>().also { m ->
         val keys = o.keys(); while (keys.hasNext()) keys.next().let { m[it] = o.optString(it) }
     }
-
-    companion object { private const val KEY = "config_list" }
 }
