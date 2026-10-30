@@ -11,18 +11,19 @@ object ConfigParser {
     fun parse(link: String): ProxyConfig? {
         val trimmed = link.trim()
         return when {
-            trimmed.startsWith("vless://", true) -> parseVless(trimmed)
-            trimmed.startsWith("vmess://", true) -> parseVmess(trimmed)
-            trimmed.startsWith("trojan://", true) -> parseTrojan(trimmed)
-            trimmed.startsWith("ss://", true) -> parseShadowsocks(trimmed)
-            trimmed.startsWith("hysteria2://", true) || trimmed.startsWith("hy2://", true) -> parseHysteria2(trimmed)
+            // ИСПРАВЛЕНО: Добавлен ignoreCase = true для всех проверок
+            trimmed.startsWith("vless://", ignoreCase = true) -> parseVless(trimmed)
+            trimmed.startsWith("vmess://", ignoreCase = true) -> parseVmess(trimmed)
+            trimmed.startsWith("trojan://", ignoreCase = true) -> parseTrojan(trimmed)
+            trimmed.startsWith("ss://", ignoreCase = true) -> parseShadowsocks(trimmed)
+            trimmed.startsWith("hysteria2://", ignoreCase = true) || trimmed.startsWith("hy2://", ignoreCase = true) -> parseHysteria2(trimmed)
             else -> null
         }
     }
 
     private fun parseVless(link: String): ProxyConfig? {
         return try {
-            val body = link.removePrefix("vless://")
+            val body = link.substring(8) // Отрезаем vless:// (8 символов)
             val hashIdx = body.indexOf('#')
             val name = if (hashIdx >= 0) decode(body.substring(hashIdx + 1)) else "VLESS"
             val main = if (hashIdx >= 0) body.substring(0, hashIdx) else body
@@ -40,7 +41,7 @@ object ConfigParser {
 
     private fun parseTrojan(link: String): ProxyConfig? {
         return try {
-            val body = link.removePrefix("trojan://")
+            val body = link.substring(9) // Отрезаем trojan:// (9 символов)
             val hashIdx = body.indexOf('#')
             val name = if (hashIdx >= 0) decode(body.substring(hashIdx + 1)) else "Trojan"
             val main = if (hashIdx >= 0) body.substring(0, hashIdx) else body
@@ -58,7 +59,7 @@ object ConfigParser {
 
     private fun parseShadowsocks(link: String): ProxyConfig? {
         return try {
-            var body = link.removePrefix("ss://")
+            var body = link.substring(5) // Отрезаем ss:// (5 символов)
             var name = "Shadowsocks"
             if (body.contains("#")) {
                 name = decode(body.substringAfter("#"))
@@ -96,7 +97,7 @@ object ConfigParser {
 
     private fun parseVmess(link: String): ProxyConfig? {
         return try {
-            val body = link.removePrefix("vmess://").trim().substringBefore('#')
+            val body = link.substring(8).trim().substringBefore('#') // Отрезаем vmess:// (8 символов)
             val decoded = decodeBase64(body) ?: return null
             val json = JSONObject(decoded)
             val host = json.optString("add", "")
@@ -122,7 +123,7 @@ object ConfigParser {
     
     private fun parseHysteria2(link: String): ProxyConfig? {
         return try {
-            val body = link.removePrefix("hysteria2://").removePrefix("hy2://")
+            val body = if (link.startsWith("hysteria2://", ignoreCase = true)) link.substring(12) else link.substring(6)
             val hashIdx = body.indexOf('#')
             val name = if (hashIdx >= 0) decode(body.substring(hashIdx + 1)) else "Hysteria2"
             val main = if (hashIdx >= 0) body.substring(0, hashIdx) else body
