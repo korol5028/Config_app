@@ -44,12 +44,20 @@ jobs:
           cp /tmp/sockstun/lib/x86/libhev-socks5-tunnel.so app/src/main/jniLibs/x86/
 
       - name: Run Unit Tests
-        run: gradle testDebugUnitTest --no-daemon --stacktrace
+        run: gradle testDebugUnitTest --no-daemon --stacktrace > build.log 2>&1 || (cat build.log && exit 1)
 
       - name: Build debug APK
-        run: gradle clean assembleDebug --no-daemon --stacktrace
+        run: gradle clean assembleDebug --no-daemon --stacktrace >> build.log 2>&1 || (cat build.log && exit 1)
 
-      - name: Upload APK
+      - name: Upload Build Log (Если упало)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      - name: Upload APK (Если собралось)
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
