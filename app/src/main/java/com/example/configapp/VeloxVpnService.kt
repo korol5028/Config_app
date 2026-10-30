@@ -48,45 +48,19 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             stopVpn(null)
             return START_NOT_STICKY
         }
-
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
-
-        if (isStarting.getAndSet(true)) {
-            Log.w("VeloxVPN", "Уже запускается, игнорируем дубликат")
-            return START_STICKY
-        }
-
+        if (isStarting.getAndSet(true)) return START_STICKY
         isStoppedByUser.set(false)
-
-        try {
-            startForeground(1, createNotification())
-        } catch (e: Exception) {
-            Log.e("VeloxVPN", "Ошибка startForeground: ${e.message}")
-        }
-
+        try { startForeground(1, createNotification()) } catch (e: Exception) {}
         Thread {
-            try {
-                startVpn(configLink)
-            } catch (e: Throwable) {
-                Log.e("VeloxVPN", "Фатальная ошибка: ${e.message}")
-                stopVpn("Ошибка: ${e.message}")
-            } finally {
-                isStarting.set(false)
-            }
+            try { startVpn(configLink) } catch (e: Throwable) { stopVpn("Ошибка: ${e.message}") } finally { isStarting.set(false) }
         }.start()
-
         return START_STICKY
     }
 
     private fun startVpn(configLink: String) {
         if (isRunning.get()) return
-
-        val xrayJson = buildXrayConfig(configLink)
-        if (xrayJson == null) {
-            stopVpn("Неверный формат ссылки или неподдерживаемый протокол")
-            return
-        }
-
+        val xrayJson = buildXrayConfig(configLink) ?: run { stopVpn("Неверный формат ссылки"); return }
         try {
             val builder = Builder()
                 .setSession("Velox VPN")
@@ -96,108 +70,90 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 .addDnsServer("8.8.8.8")
                 .setMtu(1500)
                 .setBlocking(true)
-
             try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {}
 
             vpnInterface = builder.establish()
-            val fd = vpnInterface?.fd
-            if (fd == null || fd == -1) {
-                stopVpn("Не удалось создать TUN")
-                return
-            }
+            val pfd = vpnInterface ?: run { stopVpn("Не удалось создать TUN"); return }
+            val fd = pfd.fd
+            if (fd == -1) { stopVpn("Неверный fd"); return }
 
-            // 1. Запускаем Xray
+            // 1. Запускаем Xray БЕЗ TUN (только SOCKS)
             coreController = Libv2ray.newCoreController(this)
             Thread {
                 try {
-                    coreController?.startLoop(xrayJson, fd)
+                    coreController?.startLoop(xrayJson, null) // null = без TUN
                 } catch (e: Throwable) {
-                    if (!isStoppedByUser.get()) {
-                        Log.e("VeloxVPN", "Xray упал: ${e.message}")
-                        stopVpn("Xray упал: ${e.message}")
-                    }
+                    if (!isStoppedByUser.get()) stopVpn("Xray упал: ${e.message}")
                 }
             }.start()
 
-            // 2. Ждем, пока порт 10808 реально откроется (макс 3 секунды)
+            // 2. Ждём открытия SOCKS-порта (макс 3 сек)
             var portOpen = false
-            for (i in 0 until 15) { // 15 * 200ms = 3 секунды
+            for (i in 0 until 15) {
                 TimeUnit.MILLISECONDS.sleep(200)
                 if (isStoppedByUser.get()) return
-                if (isPortOpen(10808)) {
-                    portOpen = true
-                    break
-                }
+                if (isPortOpen(10808)) { portOpen = true; break }
             }
+            if (!portOpen) { stopVpn("Xray не открыл порт 10808"); return }
 
-            if (!portOpen) {
-                stopVpn("Ядро Xray не запустилось (порт 10808 закрыт)")
-                return
-            }
-
-            // 3. Запускаем мост HEV
-            val yaml = buildHevYaml(filesDir.absolutePath + "/hev.log")
+            // 3. Запускаем HEV (он единственный читает TUN)
             val yamlFile = File(filesDir, "hev_config.yaml")
-            yamlFile.writeText(yaml)
+            yamlFile.writeText(buildHevYaml(filesDir.absolutePath + "/hev.log"))
 
             tunnelThread = Thread {
                 try {
-                    TProxyService.TProxyStartService(yamlFile.absolutePath, fd)
+                    TProxyService.TProxyStartService(yamlFile.absolutePath, fd) // pfd.fd, не detachFd
                     if (!isStoppedByUser.get()) {
-                        Log.d("VeloxVPN", "Мост HEV успешно запущен")
-                        isRunning.set(true)
-                        sendStateBroadcast(STATE_CONNECTED, null)
+                        // 4. Проверяем реальный интернет
+                        Thread {
+                            val ok = checkRealInternet()
+                            if (!isStoppedByUser.get()) {
+                                if (ok) { isRunning.set(true); sendStateBroadcast(STATE_CONNECTED, null) }
+                                else { stopVpn("Интернет не работает (проверка IP не удалась)") }
+                            }
+                        }.start()
                     }
                 } catch (e: Throwable) {
-                    if (!isStoppedByUser.get()) {
-                        Log.e("VeloxVPN", "Мост HEV упал: ${e.message}")
-                        stopVpn("Туннель упал: ${e.message}")
-                    }
+                    if (!isStoppedByUser.get()) stopVpn("HEV упал: ${e.message}")
                 }
             }.apply { isDaemon = true }
             tunnelThread?.start()
-
-        } catch (e: Throwable) {
-            stopVpn("Ошибка запуска: ${e.message}")
-        }
+        } catch (e: Throwable) { stopVpn("Ошибка запуска: ${e.message}") }
     }
 
-    // Проверка открыт ли порт (значит Xray реально запустился)
-    private fun isPortOpen(port: Int): Boolean {
-        return try {
-            val socket = Socket()
-            socket.connect(InetSocketAddress("127.0.0.1", port), 100)
-            socket.close()
-            true
-        } catch (e: Exception) {
-            false
-        }
-    }
+    private fun isPortOpen(port: Int): Boolean = try {
+        Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 100); true }
+    } catch (e: Exception) { false }
+
+    private fun checkRealInternet(): Boolean = try {
+        val url = java.net.URL("http://jsonip.com")
+        val conn = url.openConnection() as java.net.HttpURLConnection
+        conn.connectTimeout = 3000; conn.readTimeout = 3000
+        val code = conn.responseCode
+        conn.disconnect()
+        code == 200
+    } catch (e: Exception) { false }
 
     override fun startup(): Long = 0
     override fun shutdown(): Long = 0
     override fun onEmitStatus(l: Long, s: String?): Long = 0
 
-    private fun buildHevYaml(logPath: String): String {
-        return """
-            tunnel:
-              ipv4: 10.255.0.2
-              mtu: 1500
-            socks5:
-              address: 127.0.0.1
-              port: 10808
-              udp: 'udp'
-            misc:
-              log-file: $logPath
-              log-level: debug
-        """.trimIndent()
-    }
+    private fun buildHevYaml(logPath: String) = """
+        tunnel:
+          ipv4: 10.255.0.2
+          mtu: 1500
+        socks5:
+          address: 127.0.0.1
+          port: 10808
+          udp: 'udp'
+        misc:
+          log-file: $logPath
+          log-level: debug
+    """.trimIndent()
 
     private fun sendStateBroadcast(state: String, error: String?) {
         val intent = Intent(ACTION_VPN_STATE).apply {
-            putExtra(EXTRA_STATE, state)
-            if (error != null) putExtra(EXTRA_ERROR, error)
-            setPackage(packageName)
+            putExtra(EXTRA_STATE, state); if (error != null) putExtra(EXTRA_ERROR, error); setPackage(packageName)
         }
         sendBroadcast(intent)
     }
@@ -206,55 +162,37 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         try {
             val root = JSONObject()
             root.put("log", JSONObject().put("loglevel", "warning"))
+            root.put("dns", JSONObject().put("servers", JSONArray().put("1.1.1.1").put("8.8.8.8")))
 
-            val dns = JSONObject()
-            dns.put("servers", JSONArray().put("1.1.1.1").put("8.8.8.8"))
-            root.put("dns", dns)
-
-            val inbounds = JSONArray()
-            val inbound = JSONObject()
-            inbound.put("port", 10808)
-            inbound.put("listen", "127.0.0.1")
-            inbound.put("protocol", "socks")
-            inbound.put("settings", JSONObject().put("udp", true))
-            inbounds.put(inbound)
+            val inbounds = JSONArray().put(JSONObject().apply {
+                put("port", 10808); put("listen", "127.0.0.1"); put("protocol", "socks")
+                put("settings", JSONObject().put("udp", true))
+            })
             root.put("inbounds", inbounds)
 
             val outbounds = JSONArray()
             val outbound = JSONObject()
-
             when {
-                link.startsWith("vless://", ignoreCase = true) -> buildVlessOutbound(link, outbound)
-                link.startsWith("ss://", ignoreCase = true) -> buildShadowsocksOutbound(link, outbound)
-                link.startsWith("vmess://", ignoreCase = true) -> buildVmessOutbound(link, outbound)
-                link.startsWith("trojan://", ignoreCase = true) -> buildTrojanOutbound(link, outbound)
-                link.startsWith("hysteria2://", ignoreCase = true) || link.startsWith("hy2://", ignoreCase = true) -> {
-                    // Xray-core НЕ поддерживает Hysteria2, поэтому мы просто вернем null
-                    Log.e("VeloxVPN", "Hysteria2 не поддерживается этим ядром")
-                    return null
-                }
+                link.startsWith("vless://", true) -> buildVlessOutbound(link, outbound)
+                link.startsWith("ss://", true) -> buildShadowsocksOutbound(link, outbound)
+                link.startsWith("vmess://", true) -> buildVmessOutbound(link, outbound)
+                link.startsWith("trojan://", true) -> buildTrojanOutbound(link, outbound)
+                link.startsWith("hysteria2://", true) || link.startsWith("hy2://", true) -> buildHysteria2Outbound(link, outbound)
                 else -> return null
             }
-
             outbounds.put(outbound)
             outbounds.put(JSONObject().put("protocol", "freedom").put("tag", "direct"))
             outbounds.put(JSONObject().put("protocol", "blackhole").put("tag", "block"))
             root.put("outbounds", outbounds)
 
-            val routing = JSONObject()
-            val rules = JSONArray()
-            val rule = JSONObject()
-            rule.put("type", "field")
-            rule.put("ip", JSONArray().put("10.0.0.0/8").put("172.16.0.0/12").put("192.168.0.0/16").put("127.0.0.0/8"))
-            rule.put("outboundTag", "direct")
-            rules.put(rule)
-            routing.put("rules", rules)
-            root.put("routing", routing)
-
+            val rule = JSONObject().apply {
+                put("type", "field")
+                put("ip", JSONArray().put("10.0.0.0/8").put("172.16.0.0/12").put("192.168.0.0/16").put("127.0.0.0/8"))
+                put("outboundTag", "direct")
+            }
+            root.put("routing", JSONObject().put("rules", JSONArray().put(rule)))
             return root.toString(2)
-        } catch (e: Throwable) {
-            return null
-        }
+        } catch (e: Throwable) { return null }
     }
 
     private fun buildVlessOutbound(link: String, outbound: JSONObject) {
@@ -262,158 +200,93 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val security = uri.getQueryParameter("security") ?: "reality"
         val type = uri.getQueryParameter("type") ?: "tcp"
         outbound.put("protocol", "vless")
-        val vnext = JSONArray()
-        val server = JSONObject()
-        server.put("address", uri.host)
-        server.put("port", uri.port)
-        val users = JSONArray()
-        val user = JSONObject()
-        user.put("id", uri.userInfo)
-        user.put("encryption", "none")
-        uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) user.put("flow", it) }
-        users.put(user)
-        server.put("users", users)
-        vnext.put(server)
-        outbound.put("settings", JSONObject().put("vnext", vnext))
-        val stream = JSONObject()
-        stream.put("network", type)
-        stream.put("security", security)
+        val user = JSONObject().apply {
+            put("id", uri.userInfo); put("encryption", "none")
+            uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
+        }
+        outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
+            put("address", uri.host); put("port", uri.port); put("users", JSONArray().put(user))
+        })))
+        val stream = JSONObject().apply { put("network", type); put("security", security) }
         if (security == "reality") {
-            val reality = JSONObject()
-            reality.put("serverName", uri.getQueryParameter("sni") ?: uri.host)
-            reality.put("publicKey", uri.getQueryParameter("pbk") ?: "")
-            reality.put("shortId", uri.getQueryParameter("sid") ?: "")
-            reality.put("fingerprint", uri.getQueryParameter("fp") ?: "chrome")
-            reality.put("spiderX", "/")
-            stream.put("realitySettings", reality)
+            stream.put("realitySettings", JSONObject().apply {
+                put("serverName", uri.getQueryParameter("sni") ?: uri.host)
+                put("publicKey", uri.getQueryParameter("pbk") ?: "")
+                put("shortId", uri.getQueryParameter("sid") ?: "")
+                put("fingerprint", uri.getQueryParameter("fp") ?: "chrome")
+            })
         }
         outbound.put("streamSettings", stream)
     }
 
     private fun buildShadowsocksOutbound(link: String, outbound: JSONObject) {
-        val body = link.substring(5)
-        val cleanBody = if (body.contains("#")) body.substringBefore("#") else body
-        val main = cleanBody.substringBefore("?")
-        val at = main.lastIndexOf('@')
-        if (at < 0) return
-        val userInfo = main.substring(0, at)
-        val hostPort = main.substring(at + 1)
-
-        var method = ""
-        var password = ""
+        val body = link.substring(5).substringBefore("#").substringBefore("?")
+        val at = body.lastIndexOf('@'); if (at < 0) return
+        val userInfo = body.substring(0, at); val hostPort = body.substring(at + 1)
+        var method = ""; var password = ""
         val decoded = try { String(Base64.decode(userInfo.replace('-', '+').replace('_', '/'), Base64.DEFAULT), Charsets.UTF_8) } catch (e: Exception) { userInfo }
-        
-        if (decoded.contains(":")) {
-            method = decoded.substringBefore(":")
-            password = decoded.substringAfter(":")
-        } else if (userInfo.contains(":")) {
-            method = userInfo.substringBefore(":")
-            password = userInfo.substringAfter(":")
-        }
-
+        if (decoded.contains(":")) { method = decoded.substringBefore(":"); password = decoded.substringAfter(":") }
+        else if (userInfo.contains(":")) { method = userInfo.substringBefore(":"); password = userInfo.substringAfter(":") }
         outbound.put("protocol", "shadowsocks")
-        val servers = JSONArray()
-        val server = JSONObject()
-        server.put("address", hostPort.substringBefore(":"))
-        server.put("port", hostPort.substringAfter(":").toIntOrNull() ?: 443)
-        server.put("method", method)
-        server.put("password", password)
-        server.put("uot", false)
-        server.put("level", 0)
-        servers.put(server)
-        outbound.put("settings", JSONObject().put("servers", servers))
+        outbound.put("settings", JSONObject().put("servers", JSONArray().put(JSONObject().apply {
+            put("address", hostPort.substringBefore(":")); put("port", hostPort.substringAfter(":").toIntOrNull() ?: 443)
+            put("method", method); put("password", password); put("uot", false); put("level", 0)
+        })))
     }
 
-    // ИСПРАВЛЕННЫЙ VMESS (с WS и gRPC)
     private fun buildVmessOutbound(link: String, outbound: JSONObject) {
         val base64 = link.substring(8).trim().substringBefore('#')
-        val decoded = String(Base64.decode(base64, Base64.DEFAULT), Charsets.UTF_8)
-        val json = JSONObject(decoded)
+        val json = JSONObject(String(Base64.decode(base64, Base64.DEFAULT), Charsets.UTF_8))
         outbound.put("protocol", "vmess")
-        val vnext = JSONArray()
-        val server = JSONObject()
-        server.put("address", json.optString("add"))
-        server.put("port", json.optInt("port", 443))
-        val users = JSONArray()
-        val user = JSONObject()
-        user.put("id", json.optString("id"))
-        user.put("alterId", json.optInt("aid", 0))
-        user.put("security", "auto")
-        users.put(user)
-        server.put("users", users)
-        vnext.put(server)
-        outbound.put("settings", JSONObject().put("vnext", vnext))
-
-        val stream = JSONObject()
-        val net = json.optString("net", "tcp")
-        stream.put("network", net)
-        val tls = json.optString("tls", "")
-        if (tls == "tls") stream.put("security", "tls")
-
-        when (net) {
-            "ws" -> {
-                val ws = JSONObject()
-                ws.put("path", json.optString("path", "/"))
-                val headers = JSONObject()
-                val hostHeader = json.optString("host", "")
-                if (hostHeader.isNotEmpty()) headers.put("Host", hostHeader)
-                ws.put("headers", headers)
-                stream.put("wsSettings", ws)
-            }
-            "grpc" -> {
-                val grpc = JSONObject()
-                grpc.put("serviceName", json.optString("path", ""))
-                stream.put("grpcSettings", grpc)
-            }
+        val user = JSONObject().apply { put("id", json.optString("id")); put("alterId", json.optInt("aid", 0)); put("security", "auto") }
+        outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
+            put("address", json.optString("add")); put("port", json.optInt("port", 443)); put("users", JSONArray().put(user))
+        })))
+        val stream = JSONObject().apply {
+            val net = json.optString("net", "tcp"); put("network", net)
+            if (json.optString("tls", "") == "tls") put("security", "tls")
+            if (net == "ws") put("wsSettings", JSONObject().apply {
+                put("path", json.optString("path", "/")); put("headers", JSONObject().put("Host", json.optString("host", "")))
+            })
+            if (net == "grpc") put("grpcSettings", JSONObject().put("serviceName", json.optString("path", "")))
         }
         outbound.put("streamSettings", stream)
     }
 
     private fun buildTrojanOutbound(link: String, outbound: JSONObject) {
-        val uri = Uri.parse(link)
-        val password = uri.userInfo ?: return
-        val host = uri.host ?: return
-        val port = if (uri.port != -1) uri.port else 443
-        val sni = uri.getQueryParameter("sni") ?: host
-
+        val uri = Uri.parse(link); val password = uri.userInfo ?: return; val host = uri.host ?: return
+        val port = if (uri.port != -1) uri.port else 443; val sni = uri.getQueryParameter("sni") ?: host
         outbound.put("protocol", "trojan")
-        val servers = JSONArray()
-        val server = JSONObject()
-        server.put("address", host)
-        server.put("port", port)
-        server.put("password", password)
-        server.put("level", 0)
-        servers.put(server)
-        outbound.put("settings", JSONObject().put("servers", servers))
+        outbound.put("settings", JSONObject().put("servers", JSONArray().put(JSONObject().apply {
+            put("address", host); put("port", port); put("password", password); put("level", 0)
+        })))
+        outbound.put("streamSettings", JSONObject().apply {
+            put("network", "tcp"); put("security", "tls")
+            put("tlsSettings", JSONObject().apply { put("serverName", sni); put("allowInsecure", false); put("fingerprint", "chrome") })
+        })
+    }
 
-        val stream = JSONObject()
-        stream.put("network", "tcp")
-        stream.put("security", "tls")
-        val tls = JSONObject()
-        tls.put("serverName", sni)
-        tls.put("allowInsecure", false)
-        tls.put("fingerprint", "chrome") 
-        stream.put("tlsSettings", tls)
-        outbound.put("streamSettings", stream)
+    private fun buildHysteria2Outbound(link: String, outbound: JSONObject) {
+        val uri = Uri.parse(link)
+        outbound.put("protocol", "hysteria")
+        outbound.put("settings", JSONObject().apply {
+            put("version", 2); put("address", uri.host); put("port", uri.port); put("auth", uri.userInfo)
+        })
+        outbound.put("streamSettings", JSONObject().apply {
+            put("network", "hysteria")
+            put("security", "tls")
+            put("tlsSettings", JSONObject().put("serverName", uri.getQueryParameter("sni") ?: uri.host))
+        })
     }
 
     private fun stopVpn(errorMsg: String?) {
         isRunning.set(false)
+        val pfd = vpnInterface; vpnInterface = null
+        val ctrl = coreController; coreController = null
+        val thread = tunnelThread; tunnelThread = null
 
-        val pfd = vpnInterface
-        vpnInterface = null
-        val ctrl = coreController
-        coreController = null
-        val thread = tunnelThread
-        tunnelThread = null
-
-        // Отправляем статус в UI до остановки потоков
-        if (errorMsg != null) {
-            sendStateBroadcast(STATE_ERROR, errorMsg)
-            showToast(errorMsg)
-        } else {
-            sendStateBroadcast(STATE_DISCONNECTED, null)
-        }
+        if (errorMsg != null) { sendStateBroadcast(STATE_ERROR, errorMsg); showToast(errorMsg) }
+        else sendStateBroadcast(STATE_DISCONNECTED, null)
 
         Thread {
             try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
@@ -422,34 +295,23 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             try { pfd?.close() } catch (e: Throwable) {}
         }.start()
 
-        stopForeground(true)
-        stopSelf()
+        stopForeground(true); stopSelf()
     }
 
     private fun showToast(msg: String) {
-        android.os.Handler(android.os.Looper.getMainLooper()).post {
-            Toast.makeText(applicationContext, msg, Toast.LENGTH_LONG).show()
-        }
+        android.os.Handler(android.os.Looper.getMainLooper()).post { Toast.makeText(applicationContext, msg, Toast.LENGTH_LONG).show() }
     }
 
     private fun createNotification(): Notification {
         val channelId = "velox_vpn_channel"
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            nm.createNotificationChannel(NotificationChannel(channelId, "VPN", NotificationManager.IMPORTANCE_LOW))
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) nm.createNotificationChannel(NotificationChannel(channelId, "VPN", NotificationManager.IMPORTANCE_LOW))
         val stop = Intent(this, VeloxVpnService::class.java).apply { action = "STOP" }
         val pi = PendingIntent.getService(this, 0, stop, PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Velox VPN")
-            .setContentText("Подключено")
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Отключить", pi)
-            .build()
+            .setContentTitle("Velox VPN").setContentText("Подключено").setSmallIcon(android.R.drawable.ic_lock_lock)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Отключить", pi).build()
     }
 
-    override fun onDestroy() {
-        stopVpn(null)
-        super.onDestroy()
-    }
+    override fun onDestroy() { stopVpn(null); super.onDestroy() }
 }
