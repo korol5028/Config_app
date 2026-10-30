@@ -37,7 +37,8 @@ fun ConfigScreen(
     viewModel: ConfigViewModel, 
     theme: AppTheme,
     isConnected: Boolean,
-    onToggleConnection: (Boolean) -> Unit
+    isConnecting: Boolean, 
+    onToggleConnection: (Boolean, Boolean) -> Unit 
 ) {
     val configs by viewModel.configs.collectAsState()
     val subInfo by viewModel.subInfo.collectAsState()
@@ -89,16 +90,18 @@ fun ConfigScreen(
                         .size(160.dp)
                         .clip(CircleShape)
                         .background(if (isConnected) theme.accent else theme.cardBg)
-                        .clickable {
+                        .clickable(enabled = !isConnecting) { 
                             if (isConnected) {
                                 val intent = Intent(context, VeloxVpnService::class.java).apply { action = "STOP" }
                                 context.startService(intent)
-                                onToggleConnection(false)
+                                onToggleConnection(false, false)
                             } else {
                                 if (selectedConfig == null) {
                                     Toast.makeText(context, "Сначала добавьте сервер", Toast.LENGTH_SHORT).show()
                                     return@clickable
                                 }
+                                onToggleConnection(true, false) 
+                                
                                 val prepareIntent = VpnService.prepare(context)
                                 if (prepareIntent != null) {
                                     vpnPermissionLauncher.launch(prepareIntent)
@@ -117,12 +120,24 @@ fun ConfigScreen(
                         },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.PowerSettingsNew, contentDescription = null, tint = Color.White, modifier = Modifier.size(64.dp))
+                    if (isConnecting) {
+                        CircularProgressIndicator(color = theme.accent, modifier = Modifier.size(48.dp))
+                    } else {
+                        Icon(Icons.Default.PowerSettingsNew, contentDescription = null, tint = Color.White, modifier = Modifier.size(64.dp))
+                    }
                 }
             }
             Spacer(modifier = Modifier.height(16.dp))
             Text(text = selectedConfig?.name ?: "Сервер не выбран", color = theme.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text(text = if (isConnected) "ПОДКЛЮЧЕНО" else "НАЖМИТЕ ДЛЯ ПОДКЛЮЧЕНИЯ", color = if (isConnected) theme.accent else theme.textGray, fontSize = 11.sp, letterSpacing = 1.sp)
+            Text(
+                text = when {
+                    isConnecting -> "ПОДКЛЮЧЕНИЕ..."
+                    isConnected -> "ПОДКЛЮЧЕНО" 
+                    else -> "НАЖМИТЕ ДЛЯ ПОДКЛЮЧЕНИЯ"
+                }, 
+                color = if (isConnected) theme.accent else if (isConnecting) theme.text else theme.textGray, 
+                fontSize = 11.sp, letterSpacing = 1.sp
+            )
         }
 
         Spacer(modifier = Modifier.height(24.dp))
