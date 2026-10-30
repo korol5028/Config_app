@@ -70,17 +70,26 @@ fun App(
     var showImport by remember { mutableStateOf(false) }
     var importText by remember { mutableStateOf("") }
     
-    // ГЛОБАЛЬНОЕ СОСТОЯНИЕ ПОДКЛЮЧЕНИЯ (теперь не сбрасывается при переходе по вкладкам)
     var isVpnConnected by remember { mutableStateOf(false) }
+    var isVpnConnecting by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     DisposableEffect(Unit) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
                 when (intent?.getStringExtra(VeloxVpnService.EXTRA_STATE)) {
-                    VeloxVpnService.STATE_CONNECTED -> isVpnConnected = true
-                    VeloxVpnService.STATE_DISCONNECTED -> isVpnConnected = false
-                    VeloxVpnService.STATE_ERROR -> isVpnConnected = false
+                    VeloxVpnService.STATE_CONNECTED -> {
+                        isVpnConnected = true
+                        isVpnConnecting = false
+                    }
+                    VeloxVpnService.STATE_DISCONNECTED -> {
+                        isVpnConnected = false
+                        isVpnConnecting = false
+                    }
+                    VeloxVpnService.STATE_ERROR -> {
+                        isVpnConnected = false
+                        isVpnConnecting = false
+                    }
                 }
             }
         }
@@ -105,7 +114,11 @@ fun App(
                     viewModel = vm, 
                     theme = currentTheme, 
                     isConnected = isVpnConnected,
-                    onToggleConnection = { isVpnConnected = it }
+                    isConnecting = isVpnConnecting,
+                    onToggleConnection = { isConnecting, isConnectedState -> 
+                        isVpnConnecting = isConnecting
+                        isVpnConnected = isConnectedState
+                    }
                 )
                 1 -> ServersScreen(
                     viewModel = vm, 
