@@ -166,15 +166,16 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 100); true }
     } catch (e: Exception) { false }
 
+    // ИЗМЕНЕНО: Более надежный URL для проверки
     private fun checkRealInternetThroughProxy(): Boolean = try {
         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))
-        val url = URL("http://jsonip.com")
+        val url = URL("http://cp.cloudflare.com/generate_204")
         val conn = url.openConnection(proxy) as HttpURLConnection
         conn.connectTimeout = 5000
         conn.readTimeout = 5000
         val code = conn.responseCode
         conn.disconnect()
-        code == 200
+        code == 204 || code == 200
     } catch (e: Exception) {
         Log.e("VeloxVPN", "Proxy check failed: ${e.message}")
         false
