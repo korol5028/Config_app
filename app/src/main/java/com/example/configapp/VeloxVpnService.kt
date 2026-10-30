@@ -1,164 +1,405 @@
-package com.example.configapp.ui
+package com.example.configapp
 
-import android.app.Application
-import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
-import com.example.configapp.data.ConfigParser
-import com.example.configapp.data.ConfigRepository
-import com.example.configapp.data.ProxyConfig
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
+import android.net.Uri
+import android.net.VpnService
+import android.os.Build
+import android.os.ParcelFileDescriptor
+import android.util.Base64
+import android.util.Log
+import android.widget.Toast
+import androidx.core.app.NotificationCompat
+import hev.sockstun.TProxyService
+import libv2ray.CoreCallbackHandler
+import libv2ray.CoreController
+import libv2ray.Libv2ray
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.Socket
+import java.net.URL
+import java.net.HttpURLConnection
 import java.util.concurrent.TimeUnit
-import kotlin.io.encoding.Base64
-import kotlin.io.encoding.ExperimentalEncodingApi
+import java.util.concurrent.atomic.AtomicBoolean
 
-data class SubInfo(
-    val title: String = "Моя подписка",
-    val expire: String = "Неизвестно",
-    val traffic: String = "0 / 0 ГБ"
-)
+class VeloxVpnService : VpnService(), CoreCallbackHandler {
+    private var vpnInterface: ParcelFileDescriptor? = null
+    private var coreController: CoreController? = null
+    private var tunnelThread: Thread? = null
+    private val isRunning = AtomicBoolean(false)
+    private val isStarting = AtomicBoolean(false)
+    private val isStopping = AtomicBoolean(false)
+    private val isStoppedByUser = AtomicBoolean(false)
 
-class ConfigViewModel(app: Application) : AndroidViewModel(app) {
-    private val repo = ConfigRepository(app)
-    private val _configs = MutableStateFlow<List<ProxyConfig>>(emptyList())
-    val configs: StateFlow<List<ProxyConfig>> = _configs.asStateFlow()
-
-    private val _message = MutableStateFlow<String?>(null)
-    val message: StateFlow<String?> = _message.asStateFlow()
-
-    private val _subInfo = MutableStateFlow<SubInfo?>(null)
-    val subInfo: StateFlow<SubInfo?> = _subInfo.asStateFlow()
-
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .build()
-
-    init {
-        viewModelScope.launch {
-            // Загружаем конфиги асинхронно при старте
-            _configs.value = repo.loadAll()
-        }
+    companion object {
+        const val ACTION_VPN_STATE = "com.example.configapp.VPN_STATE"
+        const val EXTRA_STATE = "state"
+        const val EXTRA_ERROR = "error"
+        const val STATE_CONNECTED = "CONNECTED"
+        const val STATE_DISCONNECTED = "DISCONNECTED"
+        const val STATE_ERROR = "ERROR"
     }
 
-    fun importFromText(text: String) {
-        viewModelScope.launch {
-            _message.value = "Загрузка..."
-            val input = text.trim()
-
-            if (input.startsWith("http://") || input.startsWith("https://")) {
-                val result = downloadAndParseSubscription(input)
-                if (result.first.isEmpty()) {
-                    _message.value = result.second
-                    return@launch
-                }
-                _subInfo.value = result.third
-                val merged = _configs.value + result.first
-                _configs.value = merged
-                repo.saveAll(merged) // Вызов внутри корутины
-                _message.value = "Добавлено серверов: ${result.first.size}"
-            } else {
-                val items = parseRawText(input)
-                if (items.isEmpty()) {
-                    _message.value = "Не найдено валидных конфигов"
-                    return@launch
-                }
-                val merged = _configs.value + items
-                _configs.value = merged
-                repo.saveAll(merged) // Вызов внутри корутины
-                _message.value = "Добавлено конфигов: ${items.size}"
-            }
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == "STOP") {
+            isStoppedByUser.set(true)
+            stopVpn(null)
+            return START_NOT_STICKY
         }
-    }
 
-    private suspend fun downloadAndParseSubscription(url: String): Triple<List<ProxyConfig>, String, SubInfo?> {
-        return withContext(Dispatchers.IO) {
+        val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
+
+        if (isStarting.getAndSet(true)) return START_STICKY
+        isStoppedByUser.set(false)
+        isStopping.set(false)
+
+        try {
+            startForeground(1, createNotification())
+        } catch (e: Exception) {
+            Log.e("VeloxVPN", "Ошибка startForeground: ${e.message}")
+        }
+
+        Thread {
             try {
-                val request = Request.Builder().url(url).header("User-Agent", "v2rayNG/1.8.5").build()
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@withContext Triple(emptyList(), "Ошибка сети: ${response.code}", null)
-
-                    val contentLength = response.body?.contentLength() ?: 0L
-                    if (contentLength > 5 * 1024 * 1024) return@withContext Triple(emptyList(), "Файл слишком большой", null)
-
-                    val title = response.header("profile-title") ?: "Подписка"
-                    val userInfoStr = response.header("subscription-userinfo")
-
-                    var expireStr = "Неизвестно"
-                    var trafficStr = "0 / 0 ГБ"
-
-                    if (userInfoStr != null) {
-                        val parts = userInfoStr.split(";").map { it.trim() }
-                        var download = 0L; var total = 0L; var expireTime = 0L
-                        for (part in parts) {
-                            if (part.startsWith("download=")) download = part.substringAfter("=").toLongOrNull() ?: 0
-                            if (part.startsWith("total=")) total = part.substringAfter("=").toLongOrNull() ?: 0
-                            if (part.startsWith("expire=")) expireTime = part.substringAfter("=").toLongOrNull() ?: 0
-                        }
-                        if (expireTime > 0) expireStr = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault()).format(Date(expireTime * 1000))
-                        if (total > 0) trafficStr = "${formatBytes(download)} / ${formatBytes(total)}"
-                    }
-
-                    val subInfo = SubInfo(title, expireStr, trafficStr)
-                    var body: String? = response.body?.string()
-                    if (body.isNullOrBlank()) return@withContext Triple(emptyList(), "Пустой ответ", null)
-                    var safeBody: String = body!!.trim()
-
-                    if (!safeBody.contains("://")) {
-                        try { safeBody = decodeBase64Safe(safeBody) } catch (e: Exception) {}
-                    }
-                    Triple(parseRawText(safeBody), "OK", subInfo)
-                }
-            } catch (e: Exception) {
-                Triple(emptyList(), "Ошибка загрузки: ${e.message}", null)
+                startVpn(configLink)
+            } catch (e: Throwable) {
+                stopVpn("Ошибка: ${e.message}")
+            } finally {
+                isStarting.set(false)
             }
+        }.start()
+
+        return START_STICKY
+    }
+
+    private fun startVpn(configLink: String) {
+        if (isRunning.get()) return
+
+        val xrayJson = buildXrayConfig(configLink)
+        if (xrayJson == null) {
+            stopVpn("Неверный формат ссылки")
+            return
+        }
+
+        try {
+            val builder = Builder()
+                .setSession("Velox VPN")
+                .addAddress("10.255.0.2", 30)
+                .addRoute("0.0.0.0", 0)
+                .addDnsServer("1.1.1.1")
+                .addDnsServer("8.8.8.8")
+                .setMtu(1500)
+                .setBlocking(true)
+
+            try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {}
+
+            vpnInterface = builder.establish()
+            val fd = vpnInterface?.fd
+            if (fd == null || fd == -1) {
+                stopVpn("Не удалось создать TUN")
+                return
+            }
+
+            // 1. Запускаем Xray (SOCKS)
+            coreController = Libv2ray.newCoreController(this)
+            Thread {
+                try {
+                    coreController?.startLoop(xrayJson, 0)
+                } catch (e: Throwable) {
+                    if (!isStoppedByUser.get()) stopVpn("Xray упал: ${e.message}")
+                }
+            }.start()
+
+            // 2. Ждём открытия SOCKS-порта
+            var portOpen = false
+            for (i in 0 until 15) {
+                TimeUnit.MILLISECONDS.sleep(200)
+                if (isStoppedByUser.get()) return
+                if (isPortOpen(10808)) { portOpen = true; break }
+            }
+            if (!portOpen) {
+                stopVpn("Xray не открыл порт 10808")
+                return
+            }
+
+            // 3. Запускаем HEV
+            val yamlFile = File(filesDir, "hev_config.yaml")
+            yamlFile.writeText(buildHevYaml(filesDir.absolutePath + "/hev.log"))
+
+            tunnelThread = Thread {
+                try {
+                    TProxyService.TProxyStartService(yamlFile.absolutePath, fd)
+                } catch (e: Throwable) {
+                    if (!isStoppedByUser.get()) stopVpn("HEV упал: ${e.message}")
+                }
+            }.apply { isDaemon = true }
+            tunnelThread?.start()
+
+            // 4. Проверка интернета ЧЕРЕЗ ПРОКСИ
+            Thread {
+                TimeUnit.MILLISECONDS.sleep(500)
+                if (isStoppedByUser.get()) return@Thread
+                
+                val ok = checkRealInternetThroughProxy()
+                if (!isStoppedByUser.get()) {
+                    if (ok) {
+                        isRunning.set(true)
+                        sendStateBroadcast(STATE_CONNECTED, null)
+                    } else {
+                        stopVpn("Интернет не работает (проверка через прокси не удалась)")
+                    }
+                }
+            }.start()
+
+        } catch (e: Throwable) {
+            stopVpn("Ошибка запуска: ${e.message}")
         }
     }
 
-    @OptIn(ExperimentalEncodingApi::class)
-    private fun decodeBase64Safe(str: String): String {
-        val clean = str.replace('-', '+').replace('_', '/').replace("\n", "").replace("\r", "")
-        val padded = when (clean.length % 4) { 2 -> "$clean=="; 3 -> "$clean="; else -> clean }
-        val decodedBytes = try { Base64.UrlSafe.decode(padded) } catch (e: Exception) { Base64.Default.decode(padded) }
-        return decodedBytes.decodeToString()
+    private fun isPortOpen(port: Int): Boolean = try {
+        Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 100); true }
+    } catch (e: Exception) { false }
+
+    private fun checkRealInternetThroughProxy(): Boolean = try {
+        val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))
+        val url = URL("http://jsonip.com")
+        val conn = url.openConnection(proxy) as HttpURLConnection
+        conn.connectTimeout = 5000
+        conn.readTimeout = 5000
+        val code = conn.responseCode
+        conn.disconnect()
+        code == 200
+    } catch (e: Exception) {
+        Log.e("VeloxVPN", "Proxy check failed: ${e.message}")
+        false
     }
 
-    private fun formatBytes(bytes: Long): String {
-        if (bytes <= 0) return "0 B"
-        val units = arrayOf("B", "KB", "MB", "GB", "TB")
-        val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt()
-        return String.format(Locale.US, "%.1f %s", bytes / Math.pow(1024.0, digitGroups.toDouble()), units[digitGroups])
+    override fun startup(): Long = 0
+    override fun shutdown(): Long = 0
+    override fun onEmitStatus(l: Long, s: String?): Long = 0
+
+    private fun buildHevYaml(logPath: String) = """
+        tunnel:
+          ipv4: 10.255.0.2
+          mtu: 1500
+        socks5:
+          address: 127.0.0.1
+          port: 10808
+          udp: 'udp'
+        misc:
+          log-file: $logPath
+          log-level: debug
+    """.trimIndent()
+
+    private fun sendStateBroadcast(state: String, error: String?) {
+        val intent = Intent(ACTION_VPN_STATE).apply {
+            putExtra(EXTRA_STATE, state)
+            if (error != null) putExtra(EXTRA_ERROR, error)
+            setPackage(packageName)
+        }
+        sendBroadcast(intent)
     }
 
-    private fun parseRawText(text: String): List<ProxyConfig> {
-        return text.split('\n', '\r').map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.mapNotNull { ConfigParser.parse(it) }
+    private fun buildXrayConfig(link: String): String? {
+        try {
+            val root = JSONObject()
+            root.put("log", JSONObject().put("loglevel", "warning"))
+            root.put("dns", JSONObject().put("servers", JSONArray().put("1.1.1.1").put("8.8.8.8")))
+
+            val inbounds = JSONArray().put(JSONObject().apply {
+                put("port", 10808); put("listen", "127.0.0.1"); put("protocol", "socks")
+                put("settings", JSONObject().put("udp", true))
+            })
+            root.put("inbounds", inbounds)
+
+            val outbounds = JSONArray()
+            val outbound = JSONObject()
+            when {
+                link.startsWith("vless://", true) -> buildVlessOutbound(link, outbound)
+                link.startsWith("ss://", true) -> buildShadowsocksOutbound(link, outbound)
+                link.startsWith("vmess://", true) -> buildVmessOutbound(link, outbound)
+                link.startsWith("trojan://", true) -> buildTrojanOutbound(link, outbound)
+                link.startsWith("hysteria2://", true) || link.startsWith("hy2://", true) -> buildHysteria2Outbound(link, outbound)
+                else -> return null
+            }
+            outbounds.put(outbound)
+            outbounds.put(JSONObject().put("protocol", "freedom").put("tag", "direct"))
+            outbounds.put(JSONObject().put("protocol", "blackhole").put("tag", "block"))
+            root.put("outbounds", outbounds)
+
+            val rule = JSONObject().apply {
+                put("type", "field")
+                put("ip", JSONArray().put("10.0.0.0/8").put("172.16.0.0/12").put("192.168.0.0/16").put("127.0.0.0/8"))
+                put("outboundTag", "direct")
+            }
+            root.put("routing", JSONObject().put("rules", JSONArray().put(rule)))
+            return root.toString(2)
+        } catch (e: Throwable) { return null }
     }
 
-    fun delete(config: ProxyConfig) {
-        viewModelScope.launch {
-            val updated = _configs.value.filterNot { it.id == config.id }
-            _configs.value = updated
-            repo.saveAll(updated) // Вызов внутри корутины
+    private fun buildVlessOutbound(link: String, outbound: JSONObject) {
+        val uri = Uri.parse(link)
+        val security = uri.getQueryParameter("security") ?: "reality"
+        val type = uri.getQueryParameter("type") ?: "tcp"
+        outbound.put("protocol", "vless")
+        val user = JSONObject().apply {
+            put("id", uri.userInfo); put("encryption", "none")
+            uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
+        }
+        outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
+            put("address", uri.host); put("port", uri.port); put("users", JSONArray().put(user))
+        })))
+        val stream = JSONObject().apply { put("network", type); put("security", security) }
+        if (security == "reality") {
+            stream.put("realitySettings", JSONObject().apply {
+                put("serverName", uri.getQueryParameter("sni") ?: uri.host)
+                put("publicKey", uri.getQueryParameter("pbk") ?: "")
+                put("shortId", uri.getQueryParameter("sid") ?: "")
+                put("fingerprint", uri.getQueryParameter("fp") ?: "chrome")
+            })
+        }
+        outbound.put("streamSettings", stream)
+    }
+
+    private fun buildShadowsocksOutbound(link: String, outbound: JSONObject) {
+        val body = link.substring(5).substringBefore("#").substringBefore("?")
+        val at = body.lastIndexOf('@')
+        if (at < 0) return
+        val userInfo = body.substring(0, at)
+        val hostPortStr = body.substring(at + 1)
+        
+        val (host, port) = splitHostPort(hostPortStr) ?: return
+
+        var method = ""; var password = ""
+        val decoded = try { String(Base64.decode(userInfo.replace('-', '+').replace('_', '/'), Base64.DEFAULT), Charsets.UTF_8) } catch (e: Exception) { userInfo }
+        if (decoded.contains(":")) { method = decoded.substringBefore(":"); password = decoded.substringAfter(":") }
+        else if (userInfo.contains(":")) { method = userInfo.substringBefore(":"); password = userInfo.substringAfter(":") }
+
+        outbound.put("protocol", "shadowsocks")
+        outbound.put("settings", JSONObject().put("servers", JSONArray().put(JSONObject().apply {
+            put("address", host); put("port", port)
+            put("method", method); put("password", password); put("uot", false); put("level", 0)
+        })))
+    }
+
+    private fun splitHostPort(hostPort: String): Pair<String, Int>? {
+        val s = hostPort.trim()
+        if (s.isEmpty()) return null
+        if (s.startsWith("[")) {
+            val end = s.indexOf(']')
+            if (end < 0) return null
+            val port = s.substring(end + 1).removePrefix(":").toIntOrNull() ?: return null
+            return s.substring(1, end) to port
+        }
+        val idx = s.lastIndexOf(':')
+        if (idx < 0) return null
+        val port = s.substring(idx + 1).toIntOrNull() ?: return null
+        return s.substring(0, idx) to port
+    }
+
+    private fun buildVmessOutbound(link: String, outbound: JSONObject) {
+        val base64 = link.substring(8).trim().substringBefore('#')
+        val json = JSONObject(String(Base64.decode(base64, Base64.DEFAULT), Charsets.UTF_8))
+        outbound.put("protocol", "vmess")
+        val user = JSONObject().apply { put("id", json.optString("id")); put("alterId", json.optInt("aid", 0)); put("security", "auto") }
+        outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
+            put("address", json.optString("add")); put("port", json.optInt("port", 443)); put("users", JSONArray().put(user))
+        })))
+        val stream = JSONObject().apply {
+            val net = json.optString("net", "tcp"); put("network", net)
+            if (json.optString("tls", "") == "tls") put("security", "tls")
+            if (net == "ws") put("wsSettings", JSONObject().apply {
+                put("path", json.optString("path", "/")); put("headers", JSONObject().put("Host", json.optString("host", "")))
+            })
+            if (net == "grpc") put("grpcSettings", JSONObject().put("serviceName", json.optString("path", "")))
+        }
+        outbound.put("streamSettings", stream)
+    }
+
+    private fun buildTrojanOutbound(link: String, outbound: JSONObject) {
+        val uri = Uri.parse(link); val password = uri.userInfo ?: return; val host = uri.host ?: return
+        val port = if (uri.port != -1) uri.port else 443; val sni = uri.getQueryParameter("sni") ?: host
+        outbound.put("protocol", "trojan")
+        outbound.put("settings", JSONObject().put("servers", JSONArray().put(JSONObject().apply {
+            put("address", host); put("port", port); put("password", password); put("level", 0)
+        })))
+        outbound.put("streamSettings", JSONObject().apply {
+            put("network", "tcp"); put("security", "tls")
+            put("tlsSettings", JSONObject().apply { put("serverName", sni); put("allowInsecure", false); put("fingerprint", "chrome") })
+        })
+    }
+
+    private fun buildHysteria2Outbound(link: String, outbound: JSONObject) {
+        val uri = Uri.parse(link)
+        outbound.put("protocol", "hysteria")
+        outbound.put("settings", JSONObject().apply {
+            put("version", 2); put("address", uri.host); put("port", uri.port); put("auth", uri.userInfo)
+        })
+        outbound.put("streamSettings", JSONObject().apply {
+            put("network", "hysteria")
+            put("security", "tls")
+            put("tlsSettings", JSONObject().put("serverName", uri.getQueryParameter("sni") ?: uri.host))
+        })
+    }
+
+    private fun stopVpn(errorMsg: String?) {
+        if (isStopping.getAndSet(true)) return
+        isRunning.set(false)
+
+        val pfd = vpnInterface
+        vpnInterface = null
+        val ctrl = coreController
+        coreController = null
+        val thread = tunnelThread
+        tunnelThread = null
+
+        if (errorMsg != null) {
+            sendStateBroadcast(STATE_ERROR, errorMsg)
+            showToast(errorMsg)
+        } else {
+            sendStateBroadcast(STATE_DISCONNECTED, null)
+        }
+
+        Thread {
+            try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
+            thread?.interrupt()
+            try { ctrl?.stopLoop() } catch (e: Throwable) {}
+            try { pfd?.close() } catch (e: Throwable) {}
+            stopForeground(true)
+            stopSelf()
+        }.start()
+    }
+
+    private fun showToast(msg: String) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            Toast.makeText(applicationContext, msg, Toast.LENGTH_LONG).show()
         }
     }
 
-    fun clearAll() {
-        viewModelScope.launch {
-            _configs.value = emptyList()
-            repo.saveAll(emptyList()) // Вызов внутри корутины
-            _subInfo.value = null
-            _message.value = "Все сервера удалены"
+    private fun createNotification(): Notification {
+        val channelId = "velox_vpn_channel"
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            nm.createNotificationChannel(NotificationChannel(channelId, "VPN", NotificationManager.IMPORTANCE_LOW))
         }
+        val stop = Intent(this, VeloxVpnService::class.java).apply { action = "STOP" }
+        val pi = PendingIntent.getService(this, 0, stop, PendingIntent.FLAG_IMMUTABLE)
+        return NotificationCompat.Builder(this, channelId)
+            .setContentTitle("Velox VPN")
+            .setContentText("Подключено")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Отключить", pi)
+            .build()
     }
 
-    fun consumeMessage() { _message.value = null }
+    override fun onDestroy() {
+        stopVpn(null)
+        super.onDestroy()
+    }
 }
