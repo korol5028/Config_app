@@ -22,6 +22,9 @@ import org.json.JSONObject
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.Proxy
+import java.net.URL
+import java.net.HttpURLConnection
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -131,45 +134,54 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
             tunnelThread = Thread {
                 try {
+                    // ВАЖНО: Этот вызов БЛОКИРУЕТ поток до момента остановки VPN
                     TProxyService.TProxyStartService(yamlFile.absolutePath, fd)
-                    if (!isStoppedByUser.get()) {
-                        // 4. Проверка интернета
-                        Thread {
-                            val ok = checkRealInternet()
-                            if (!isStoppedByUser.get()) {
-                                if (ok) {
-                                    isRunning.set(true)
-                                    sendStateBroadcast(STATE_CONNECTED, null)
-                                } else {
-                                    stopVpn("Интернет не работает (проверка IP не удалась)")
-                                }
-                            }
-                        }.start()
-                    }
                 } catch (e: Throwable) {
                     if (!isStoppedByUser.get()) stopVpn("HEV упал: ${e.message}")
                 }
             }.apply { isDaemon = true }
             tunnelThread?.start()
 
+            // 4. Отдельный поток для проверки интернета ЧЕРЕЗ SOCKS-ПРОКСИ
+            Thread {
+                TimeUnit.MILLISECONDS.sleep(500) // Даем HEV время подняться
+                if (isStoppedByUser.get()) return@Thread
+                
+                val ok = checkRealInternetThroughProxy()
+                if (!isStoppedByUser.get()) {
+                    if (ok) {
+                        isRunning.set(true)
+                        sendStateBroadcast(STATE_CONNECTED, null)
+                    } else {
+                        stopVpn("Интернет не работает (проверка через прокси не удалась)")
+                    }
+                }
+            }.start()
+
         } catch (e: Throwable) {
             stopVpn("Ошибка запуска: ${e.message}")
         }
     }
 
+    // Проверка порта
     private fun isPortOpen(port: Int): Boolean = try {
         Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 100); true }
     } catch (e: Exception) { false }
 
-    private fun checkRealInternet(): Boolean = try {
-        val url = java.net.URL("http://jsonip.com")
-        val conn = url.openConnection() as java.net.HttpURLConnection
-        conn.connectTimeout = 3000
-        conn.readTimeout = 3000
+    // ПРОВЕРКА ЧЕРЕЗ SOCKS-ПРОКСИ (а не напрямую)
+    private fun checkRealInternetThroughProxy(): Boolean = try {
+        val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))
+        val url = URL("http://jsonip.com")
+        val conn = url.openConnection(proxy) as HttpURLConnection
+        conn.connectTimeout = 5000
+        conn.readTimeout = 5000
         val code = conn.responseCode
         conn.disconnect()
         code == 200
-    } catch (e: Exception) { false }
+    } catch (e: Exception) {
+        Log.e("VeloxVPN", "Proxy check failed: ${e.message}")
+        false
+    }
 
     override fun startup(): Long = 0
     override fun shutdown(): Long = 0
@@ -258,19 +270,43 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         outbound.put("streamSettings", stream)
     }
 
+    // ИСПРАВЛЕННЫЙ Shadowsocks (корректно разбирает IPv6)
     private fun buildShadowsocksOutbound(link: String, outbound: JSONObject) {
         val body = link.substring(5).substringBefore("#").substringBefore("?")
-        val at = body.lastIndexOf('@'); if (at < 0) return
-        val userInfo = body.substring(0, at); val hostPort = body.substring(at + 1)
+        val at = body.lastIndexOf('@')
+        if (at < 0) return
+        val userInfo = body.substring(0, at)
+        val hostPortStr = body.substring(at + 1)
+        
+        // Парсим host:port с учетом IPv6
+        val (host, port) = splitHostPort(hostPortStr) ?: return
+
         var method = ""; var password = ""
         val decoded = try { String(Base64.decode(userInfo.replace('-', '+').replace('_', '/'), Base64.DEFAULT), Charsets.UTF_8) } catch (e: Exception) { userInfo }
         if (decoded.contains(":")) { method = decoded.substringBefore(":"); password = decoded.substringAfter(":") }
         else if (userInfo.contains(":")) { method = userInfo.substringBefore(":"); password = userInfo.substringAfter(":") }
+
         outbound.put("protocol", "shadowsocks")
         outbound.put("settings", JSONObject().put("servers", JSONArray().put(JSONObject().apply {
-            put("address", hostPort.substringBefore(":")); put("port", hostPort.substringAfter(":").toIntOrNull() ?: 443)
+            put("address", host); put("port", port)
             put("method", method); put("password", password); put("uot", false); put("level", 0)
         })))
+    }
+
+    // Вспомогательная функция для IPv6
+    private fun splitHostPort(hostPort: String): Pair<String, Int>? {
+        val s = hostPort.trim()
+        if (s.isEmpty()) return null
+        if (s.startsWith("[")) {
+            val end = s.indexOf(']')
+            if (end < 0) return null
+            val port = s.substring(end + 1).removePrefix(":").toIntOrNull() ?: return null
+            return s.substring(1, end) to port
+        }
+        val idx = s.lastIndexOf(':')
+        if (idx < 0) return null
+        val port = s.substring(idx + 1).toIntOrNull() ?: return null
+        return s.substring(0, idx) to port
     }
 
     private fun buildVmessOutbound(link: String, outbound: JSONObject) {
