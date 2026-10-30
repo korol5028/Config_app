@@ -81,7 +81,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             coreController = Libv2ray.newCoreController(this)
             Thread {
                 try {
-                    coreController?.startLoop(xrayJson, null) // null = без TUN
+                    // ИСПРАВЛЕНО: передаем 0 вместо null
+                    coreController?.startLoop(xrayJson, 0) 
                 } catch (e: Throwable) {
                     if (!isStoppedByUser.get()) stopVpn("Xray упал: ${e.message}")
                 }
