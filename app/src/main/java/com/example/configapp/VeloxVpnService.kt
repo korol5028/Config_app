@@ -20,6 +20,8 @@ import libv2ray.Libv2ray
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -29,6 +31,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private var tunnelThread: Thread? = null
     private val isRunning = AtomicBoolean(false)
     private val isStarting = AtomicBoolean(false)
+    private val isStoppedByUser = AtomicBoolean(false)
 
     companion object {
         const val ACTION_VPN_STATE = "com.example.configapp.VPN_STATE"
@@ -41,6 +44,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP") {
+            isStoppedByUser.set(true)
             stopVpn(null)
             return START_NOT_STICKY
         }
@@ -51,6 +55,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             Log.w("VeloxVPN", "Уже запускается, игнорируем дубликат")
             return START_STICKY
         }
+
+        isStoppedByUser.set(false)
 
         try {
             startForeground(1, createNotification())
@@ -77,7 +83,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
         val xrayJson = buildXrayConfig(configLink)
         if (xrayJson == null) {
-            stopVpn("Неверный формат ссылки")
+            stopVpn("Неверный формат ссылки или неподдерживаемый протокол")
             return
         }
 
@@ -100,21 +106,36 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 return
             }
 
-            // 1. Запускаем Xray в фоне
+            // 1. Запускаем Xray
             coreController = Libv2ray.newCoreController(this)
             Thread {
                 try {
                     coreController?.startLoop(xrayJson, fd)
-                    Log.d("VeloxVPN", "Xray запущен")
                 } catch (e: Throwable) {
-                    Log.e("VeloxVPN", "Xray упал: ${e.message}")
-                    stopVpn("Xray упал: ${e.message}")
+                    if (!isStoppedByUser.get()) {
+                        Log.e("VeloxVPN", "Xray упал: ${e.message}")
+                        stopVpn("Xray упал: ${e.message}")
+                    }
                 }
             }.start()
 
-            // 2. Ждем ровно 300 мс, чтобы Xray открыл порт 10808, и запускаем мост
-            TimeUnit.MILLISECONDS.sleep(300)
+            // 2. Ждем, пока порт 10808 реально откроется (макс 3 секунды)
+            var portOpen = false
+            for (i in 0 until 15) { // 15 * 200ms = 3 секунды
+                TimeUnit.MILLISECONDS.sleep(200)
+                if (isStoppedByUser.get()) return
+                if (isPortOpen(10808)) {
+                    portOpen = true
+                    break
+                }
+            }
 
+            if (!portOpen) {
+                stopVpn("Ядро Xray не запустилось (порт 10808 закрыт)")
+                return
+            }
+
+            // 3. Запускаем мост HEV
             val yaml = buildHevYaml(filesDir.absolutePath + "/hev.log")
             val yamlFile = File(filesDir, "hev_config.yaml")
             yamlFile.writeText(yaml)
@@ -122,18 +143,34 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             tunnelThread = Thread {
                 try {
                     TProxyService.TProxyStartService(yamlFile.absolutePath, fd)
-                    Log.d("VeloxVPN", "Мост Hev запущен")
-                    isRunning.set(true)
-                    sendStateBroadcast(STATE_CONNECTED, null)
+                    if (!isStoppedByUser.get()) {
+                        Log.d("VeloxVPN", "Мост HEV успешно запущен")
+                        isRunning.set(true)
+                        sendStateBroadcast(STATE_CONNECTED, null)
+                    }
                 } catch (e: Throwable) {
-                    Log.e("VeloxVPN", "Мост Hev упал: ${e.message}")
-                    stopVpn("Туннель упал: ${e.message}")
+                    if (!isStoppedByUser.get()) {
+                        Log.e("VeloxVPN", "Мост HEV упал: ${e.message}")
+                        stopVpn("Туннель упал: ${e.message}")
+                    }
                 }
             }.apply { isDaemon = true }
             tunnelThread?.start()
 
         } catch (e: Throwable) {
             stopVpn("Ошибка запуска: ${e.message}")
+        }
+    }
+
+    // Проверка открыт ли порт (значит Xray реально запустился)
+    private fun isPortOpen(port: Int): Boolean {
+        return try {
+            val socket = Socket()
+            socket.connect(InetSocketAddress("127.0.0.1", port), 100)
+            socket.close()
+            true
+        } catch (e: Exception) {
+            false
         }
     }
 
@@ -187,11 +224,15 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             val outbound = JSONObject()
 
             when {
-                link.startsWith("vless://") -> buildVlessOutbound(link, outbound)
-                link.startsWith("ss://") -> buildShadowsocksOutbound(link, outbound)
-                link.startsWith("vmess://") -> buildVmessOutbound(link, outbound)
-                link.startsWith("trojan://") -> buildTrojanOutbound(link, outbound)
-                link.startsWith("hysteria2://") || link.startsWith("hy2://") -> buildHysteria2Outbound(link, outbound)
+                link.startsWith("vless://", ignoreCase = true) -> buildVlessOutbound(link, outbound)
+                link.startsWith("ss://", ignoreCase = true) -> buildShadowsocksOutbound(link, outbound)
+                link.startsWith("vmess://", ignoreCase = true) -> buildVmessOutbound(link, outbound)
+                link.startsWith("trojan://", ignoreCase = true) -> buildTrojanOutbound(link, outbound)
+                link.startsWith("hysteria2://", ignoreCase = true) || link.startsWith("hy2://", ignoreCase = true) -> {
+                    // Xray-core НЕ поддерживает Hysteria2, поэтому мы просто вернем null
+                    Log.e("VeloxVPN", "Hysteria2 не поддерживается этим ядром")
+                    return null
+                }
                 else -> return null
             }
 
@@ -212,7 +253,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
             return root.toString(2)
         } catch (e: Throwable) {
-            Log.e("VeloxVPN", "Ошибка сборки конфига: ${e.message}")
             return null
         }
     }
@@ -251,15 +291,18 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     }
 
     private fun buildShadowsocksOutbound(link: String, outbound: JSONObject) {
-        var body = link.removePrefix("ss://")
-        if (body.contains("#")) body = body.substringBefore("#")
-        body = body.substringBefore("?")
-        val at = body.lastIndexOf('@')
-        val userInfo = body.substring(0, at)
-        val hostPort = body.substring(at + 1)
+        val body = link.substring(5)
+        val cleanBody = if (body.contains("#")) body.substringBefore("#") else body
+        val main = cleanBody.substringBefore("?")
+        val at = main.lastIndexOf('@')
+        if (at < 0) return
+        val userInfo = main.substring(0, at)
+        val hostPort = main.substring(at + 1)
+
         var method = ""
         var password = ""
         val decoded = try { String(Base64.decode(userInfo.replace('-', '+').replace('_', '/'), Base64.DEFAULT), Charsets.UTF_8) } catch (e: Exception) { userInfo }
+        
         if (decoded.contains(":")) {
             method = decoded.substringBefore(":")
             password = decoded.substringAfter(":")
@@ -267,6 +310,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             method = userInfo.substringBefore(":")
             password = userInfo.substringAfter(":")
         }
+
         outbound.put("protocol", "shadowsocks")
         val servers = JSONArray()
         val server = JSONObject()
@@ -280,8 +324,9 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         outbound.put("settings", JSONObject().put("servers", servers))
     }
 
+    // ИСПРАВЛЕННЫЙ VMESS (с WS и gRPC)
     private fun buildVmessOutbound(link: String, outbound: JSONObject) {
-        val base64 = link.removePrefix("vmess://").trim().substringBefore('#')
+        val base64 = link.substring(8).trim().substringBefore('#')
         val decoded = String(Base64.decode(base64, Base64.DEFAULT), Charsets.UTF_8)
         val json = JSONObject(decoded)
         outbound.put("protocol", "vmess")
@@ -298,17 +343,20 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         server.put("users", users)
         vnext.put(server)
         outbound.put("settings", JSONObject().put("vnext", vnext))
+
         val stream = JSONObject()
         val net = json.optString("net", "tcp")
         stream.put("network", net)
         val tls = json.optString("tls", "")
         if (tls == "tls") stream.put("security", "tls")
+
         when (net) {
             "ws" -> {
                 val ws = JSONObject()
                 ws.put("path", json.optString("path", "/"))
                 val headers = JSONObject()
-                headers.put("Host", json.optString("host", ""))
+                val hostHeader = json.optString("host", "")
+                if (hostHeader.isNotEmpty()) headers.put("Host", hostHeader)
                 ws.put("headers", headers)
                 stream.put("wsSettings", ws)
             }
@@ -341,30 +389,11 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val stream = JSONObject()
         stream.put("network", "tcp")
         stream.put("security", "tls")
-        
         val tls = JSONObject()
         tls.put("serverName", sni)
         tls.put("allowInsecure", false)
         tls.put("fingerprint", "chrome") 
-        
         stream.put("tlsSettings", tls)
-        outbound.put("streamSettings", stream)
-    }
-
-    // ВНИМАНИЕ: Xray-core не поддерживает Hysteria2, этот сервер не заработает!
-    private fun buildHysteria2Outbound(link: String, outbound: JSONObject) {
-        val uri = Uri.parse(link)
-        outbound.put("protocol", "hysteria")
-        val settings = JSONObject()
-        settings.put("version", 2)
-        settings.put("address", uri.host)
-        settings.put("port", uri.port)
-        settings.put("auth", uri.userInfo)
-        outbound.put("settings", settings)
-        val stream = JSONObject()
-        stream.put("network", "hysteria")
-        stream.put("security", "tls")
-        stream.put("tlsSettings", JSONObject().put("serverName", uri.getQueryParameter("sni") ?: uri.host))
         outbound.put("streamSettings", stream)
     }
 
@@ -378,7 +407,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val thread = tunnelThread
         tunnelThread = null
 
-        // Отправляем бродкаст ДО остановки потоков, чтобы UI сразу понял
+        // Отправляем статус в UI до остановки потоков
         if (errorMsg != null) {
             sendStateBroadcast(STATE_ERROR, errorMsg)
             showToast(errorMsg)
@@ -386,7 +415,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             sendStateBroadcast(STATE_DISCONNECTED, null)
         }
 
-        // Принудительно закрываем всё в фоне
         Thread {
             try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
             thread?.interrupt()
