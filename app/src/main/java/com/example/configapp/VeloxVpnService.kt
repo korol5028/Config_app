@@ -31,6 +31,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private var tunnelThread: Thread? = null
     private val isRunning = AtomicBoolean(false)
     private val isStarting = AtomicBoolean(false)
+    private val isStopping = AtomicBoolean(false)
     private val isStoppedByUser = AtomicBoolean(false)
 
     companion object {
@@ -48,19 +49,41 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             stopVpn(null)
             return START_NOT_STICKY
         }
+
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
+
         if (isStarting.getAndSet(true)) return START_STICKY
         isStoppedByUser.set(false)
-        try { startForeground(1, createNotification()) } catch (e: Exception) {}
+        isStopping.set(false)
+
+        try {
+            startForeground(1, createNotification())
+        } catch (e: Exception) {
+            Log.e("VeloxVPN", "Ошибка startForeground: ${e.message}")
+        }
+
         Thread {
-            try { startVpn(configLink) } catch (e: Throwable) { stopVpn("Ошибка: ${e.message}") } finally { isStarting.set(false) }
+            try {
+                startVpn(configLink)
+            } catch (e: Throwable) {
+                stopVpn("Ошибка: ${e.message}")
+            } finally {
+                isStarting.set(false)
+            }
         }.start()
+
         return START_STICKY
     }
 
     private fun startVpn(configLink: String) {
         if (isRunning.get()) return
-        val xrayJson = buildXrayConfig(configLink) ?: run { stopVpn("Неверный формат ссылки"); return }
+
+        val xrayJson = buildXrayConfig(configLink)
+        if (xrayJson == null) {
+            stopVpn("Неверный формат ссылки")
+            return
+        }
+
         try {
             val builder = Builder()
                 .setSession("Velox VPN")
@@ -70,47 +93,56 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 .addDnsServer("8.8.8.8")
                 .setMtu(1500)
                 .setBlocking(true)
+
             try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {}
 
             vpnInterface = builder.establish()
-            val pfd = vpnInterface ?: run { stopVpn("Не удалось создать TUN"); return }
-            val fd = pfd.fd
-            if (fd == -1) { stopVpn("Неверный fd"); return }
+            val fd = vpnInterface?.fd
+            if (fd == null || fd == -1) {
+                stopVpn("Не удалось создать TUN")
+                return
+            }
 
-            // 1. Запускаем Xray БЕЗ TUN (только SOCKS)
+            // 1. Запускаем Xray (SOCKS)
             coreController = Libv2ray.newCoreController(this)
             Thread {
                 try {
-                    // ИСПРАВЛЕНО: передаем 0 вместо null
-                    coreController?.startLoop(xrayJson, 0) 
+                    coreController?.startLoop(xrayJson, 0)
                 } catch (e: Throwable) {
                     if (!isStoppedByUser.get()) stopVpn("Xray упал: ${e.message}")
                 }
             }.start()
 
-            // 2. Ждём открытия SOCKS-порта (макс 3 сек)
+            // 2. Ждём открытия SOCKS-порта
             var portOpen = false
             for (i in 0 until 15) {
                 TimeUnit.MILLISECONDS.sleep(200)
                 if (isStoppedByUser.get()) return
                 if (isPortOpen(10808)) { portOpen = true; break }
             }
-            if (!portOpen) { stopVpn("Xray не открыл порт 10808"); return }
+            if (!portOpen) {
+                stopVpn("Xray не открыл порт 10808")
+                return
+            }
 
-            // 3. Запускаем HEV (он единственный читает TUN)
+            // 3. Запускаем HEV
             val yamlFile = File(filesDir, "hev_config.yaml")
             yamlFile.writeText(buildHevYaml(filesDir.absolutePath + "/hev.log"))
 
             tunnelThread = Thread {
                 try {
-                    TProxyService.TProxyStartService(yamlFile.absolutePath, fd) // pfd.fd, не detachFd
+                    TProxyService.TProxyStartService(yamlFile.absolutePath, fd)
                     if (!isStoppedByUser.get()) {
-                        // 4. Проверяем реальный интернет
+                        // 4. Проверка интернета
                         Thread {
                             val ok = checkRealInternet()
                             if (!isStoppedByUser.get()) {
-                                if (ok) { isRunning.set(true); sendStateBroadcast(STATE_CONNECTED, null) }
-                                else { stopVpn("Интернет не работает (проверка IP не удалась)") }
+                                if (ok) {
+                                    isRunning.set(true)
+                                    sendStateBroadcast(STATE_CONNECTED, null)
+                                } else {
+                                    stopVpn("Интернет не работает (проверка IP не удалась)")
+                                }
                             }
                         }.start()
                     }
@@ -119,7 +151,10 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 }
             }.apply { isDaemon = true }
             tunnelThread?.start()
-        } catch (e: Throwable) { stopVpn("Ошибка запуска: ${e.message}") }
+
+        } catch (e: Throwable) {
+            stopVpn("Ошибка запуска: ${e.message}")
+        }
     }
 
     private fun isPortOpen(port: Int): Boolean = try {
@@ -129,7 +164,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private fun checkRealInternet(): Boolean = try {
         val url = java.net.URL("http://jsonip.com")
         val conn = url.openConnection() as java.net.HttpURLConnection
-        conn.connectTimeout = 3000; conn.readTimeout = 3000
+        conn.connectTimeout = 3000
+        conn.readTimeout = 3000
         val code = conn.responseCode
         conn.disconnect()
         code == 200
@@ -154,7 +190,9 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
     private fun sendStateBroadcast(state: String, error: String?) {
         val intent = Intent(ACTION_VPN_STATE).apply {
-            putExtra(EXTRA_STATE, state); if (error != null) putExtra(EXTRA_ERROR, error); setPackage(packageName)
+            putExtra(EXTRA_STATE, state)
+            if (error != null) putExtra(EXTRA_ERROR, error)
+            setPackage(packageName)
         }
         sendBroadcast(intent)
     }
@@ -281,38 +319,57 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     }
 
     private fun stopVpn(errorMsg: String?) {
+        if (isStopping.getAndSet(true)) return
         isRunning.set(false)
-        val pfd = vpnInterface; vpnInterface = null
-        val ctrl = coreController; coreController = null
-        val thread = tunnelThread; tunnelThread = null
 
-        if (errorMsg != null) { sendStateBroadcast(STATE_ERROR, errorMsg); showToast(errorMsg) }
-        else sendStateBroadcast(STATE_DISCONNECTED, null)
+        val pfd = vpnInterface
+        vpnInterface = null
+        val ctrl = coreController
+        coreController = null
+        val thread = tunnelThread
+        tunnelThread = null
+
+        if (errorMsg != null) {
+            sendStateBroadcast(STATE_ERROR, errorMsg)
+            showToast(errorMsg)
+        } else {
+            sendStateBroadcast(STATE_DISCONNECTED, null)
+        }
 
         Thread {
             try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
             thread?.interrupt()
             try { ctrl?.stopLoop() } catch (e: Throwable) {}
             try { pfd?.close() } catch (e: Throwable) {}
+            stopForeground(true)
+            stopSelf()
         }.start()
-
-        stopForeground(true); stopSelf()
     }
 
     private fun showToast(msg: String) {
-        android.os.Handler(android.os.Looper.getMainLooper()).post { Toast.makeText(applicationContext, msg, Toast.LENGTH_LONG).show() }
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            Toast.makeText(applicationContext, msg, Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun createNotification(): Notification {
         val channelId = "velox_vpn_channel"
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) nm.createNotificationChannel(NotificationChannel(channelId, "VPN", NotificationManager.IMPORTANCE_LOW))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            nm.createNotificationChannel(NotificationChannel(channelId, "VPN", NotificationManager.IMPORTANCE_LOW))
+        }
         val stop = Intent(this, VeloxVpnService::class.java).apply { action = "STOP" }
         val pi = PendingIntent.getService(this, 0, stop, PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Velox VPN").setContentText("Подключено").setSmallIcon(android.R.drawable.ic_lock_lock)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Отключить", pi).build()
+            .setContentTitle("Velox VPN")
+            .setContentText("Подключено")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Отключить", pi)
+            .build()
     }
 
-    override fun onDestroy() { stopVpn(null); super.onDestroy() }
+    override fun onDestroy() {
+        stopVpn(null)
+        super.onDestroy()
+    }
 }
