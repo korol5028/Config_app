@@ -167,12 +167,12 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))
             val client = OkHttpClient.Builder()
                 .proxy(proxy)
-                .connectTimeout(5, TimeUnit.SECONDS)
-                .readTimeout(5, TimeUnit.SECONDS)
+                .connectTimeout(10, TimeUnit.SECONDS) // Увеличили таймаут
+                .readTimeout(10, TimeUnit.SECONDS)    // Увеличили таймаут
                 .build()
 
             val request = Request.Builder()
-                .url("https://cp.cloudflare.com/generate_204") // ИСПРАВЛЕНО: http на https
+                .url("https://www.gstatic.com/generate_204") // Более надежный адрес
                 .build()
 
             val response = client.newCall(request).execute()
