@@ -56,9 +56,9 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
 
         if (isStarting.get() || isRunning.get()) {
-            Log.w("VeloxVPN", "Сервис уже запущен или запускается, перезапускаем...")
+            Log.w("VeloxVPN", "Сервис уже работает. Перезапуск...")
             stopVpn(null)
-            try { Thread.sleep(300) } catch (e: InterruptedException) {}
+            try { Thread.sleep(500) } catch (e: InterruptedException) {}
         }
 
         isStarting.set(true)
@@ -68,8 +68,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         try {
             startForeground(1, createNotification())
         } catch (e: Exception) {
-            Log.e("VeloxVPN", "Фатальная ошибка startForeground: ${e.message}")
-            stopVpn("Ошибка запуска сервиса уведомлений")
+            Log.e("VeloxVPN", "Ошибка startForeground: ${e.message}")
+            stopVpn("Ошибка уведомлений")
             return START_NOT_STICKY
         }
 
@@ -89,7 +89,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private fun startVpn(configLink: String) {
         val xrayJson = buildXrayConfig(configLink)
         if (xrayJson == null) {
-            stopVpn("Неверный формат ссылки или неподдерживаемый протокол (Hysteria2)")
+            stopVpn("Неверный формат ссылки")
             return
         }
 
@@ -97,33 +97,36 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             val builder = Builder()
                 .setSession("Velox VPN")
                 .addAddress("10.255.0.2", 30)
-                .addAddress("fd00::1", 128) 
                 .addRoute("0.0.0.0", 0)
-                .addRoute("::", 0)          
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
-                .setMtu(1280) 
+                .setMtu(1280)
                 .setBlocking(true)
 
             try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {}
 
-            try {
-                vpnInterface = builder.establish()
+            vpnInterface = try {
+                builder.establish()
             } catch (e: Exception) {
-                stopVpn("Android не разрешил создать VPN: ${e.message}")
+                stopVpn("Android запретил VPN: ${e.message}")
+                return
+            }
+
+            if (vpnInterface == null) {
+                stopVpn("VPN не создан (null)")
                 return
             }
 
             val fd = vpnInterface?.fd
             if (fd == null || fd == -1) {
-                stopVpn("Не удалось создать TUN-интерфейс")
+                stopVpn("Неверный fd TUN")
                 return
             }
 
             coreController = Libv2ray.newCoreController(this)
             Thread {
                 try {
-                    coreController?.startLoop(xrayJson, 0) 
+                    coreController?.startLoop(xrayJson, 0)
                 } catch (e: Throwable) {
                     if (!isStoppedByUser.get()) stopVpn("Xray упал: ${e.message}")
                 }
@@ -136,7 +139,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 if (isPortOpen(10808)) { portOpen = true; break }
             }
             if (!portOpen) {
-                stopVpn("Xray не открыл порт 10808 за 10 секунд")
+                stopVpn("Xray не открыл порт")
                 return
             }
 
@@ -152,7 +155,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             }.apply { isDaemon = true }
             tunnelThread?.start()
 
-            TimeUnit.MILLISECONDS.sleep(1500)
+            TimeUnit.MILLISECONDS.sleep(2000)
+            if (isStoppedByUser.get()) return
 
             Thread {
                 if (checkRealInternetThroughProxy()) {
@@ -190,10 +194,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             val response = client.newCall(request).execute()
             val code = response.code
             response.close()
-            Log.d("VeloxVPN", "Проверка прокси: код $code")
             code == 204 || code == 200
         } catch (e: Exception) {
-            Log.e("VeloxVPN", "Ошибка проверки прокси: ${e.message}")
             showToast("Ошибка прокси: ${e.message}")
             false
         }
@@ -206,7 +208,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private fun buildHevYaml(logPath: String) = """
         tunnel:
           ipv4: 10.255.0.2
-          ipv6: 'fd00::1'
           mtu: 1280
         socks5:
           address: 127.0.0.1
@@ -228,10 +229,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
     private fun buildXrayConfig(link: String): String? {
         try {
-            if (link.startsWith("hysteria2://", true) || link.startsWith("hy2://", true)) {
-                Log.e("VeloxVPN", "Hysteria2 не поддерживается этим ядром")
-                return null
-            }
+            if (link.startsWith("hysteria2://", true) || link.startsWith("hy2://", true)) return null
 
             val root = JSONObject()
             root.put("log", JSONObject().put("loglevel", "warning"))
@@ -287,8 +285,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val user = JSONObject().apply {
             put("id", uri.userInfo)
             put("encryption", "none")
-            // ВОЗВРАЩАЕМ FLOW (он обязателен для твоего сервера)
-            uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
         }
         
         outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
@@ -301,8 +297,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 put("serverName", uri.getQueryParameter("sni") ?: uri.host)
                 put("publicKey", uri.getQueryParameter("pbk") ?: "")
                 put("shortId", uri.getQueryParameter("sid") ?: "")
-                // БЕРЕМ FIREFOX ИЗ ССЫЛКИ
-                put("fingerprint", uri.getQueryParameter("fp") ?: "firefox")
+                put("fingerprint", "chrome")
                 put("spiderX", "/")
             })
         }
