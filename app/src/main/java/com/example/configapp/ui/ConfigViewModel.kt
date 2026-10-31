@@ -83,7 +83,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                     if (!response.isSuccessful) return@withContext Triple(emptyList(), "Ошибка сети: ${response.code}", null)
                     
                     val contentLength = response.body?.contentLength() ?: 0L
-                    if (contentLength > 10 * 1024 * 1024) return@withContext Triple(emptyList(), "Файл слишком большой", null)
+                    if (contentLength > 5 * 1024 * 1024) return@withContext Triple(emptyList(), "Файл слишком большой", null)
 
                     val title = response.header("profile-title") ?: "Подписка"
                     val userInfoStr = response.header("subscription-userinfo")
@@ -135,24 +135,26 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun parseRawText(text: String): List<ProxyConfig> {
-        return text.split('\n', '\r')
-            .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith("#") }
-            .mapNotNull { ConfigParser.parse(it) }
-            .take(200)
+        return text.split('\n', '\r').map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.mapNotNull { ConfigParser.parse(it) }
     }
 
+    // ИСПРАВЛЕНО: Обернули в корутину
     fun delete(config: ProxyConfig) {
-        val updated = _configs.value.filterNot { it.id == config.id }
-        _configs.value = updated
-        repo.saveAll(updated)
+        viewModelScope.launch {
+            val updated = _configs.value.filterNot { it.id == config.id }
+            _configs.value = updated
+            repo.saveAll(updated)
+        }
     }
 
+    // ИСПРАВЛЕНО: Обернули в корутину
     fun clearAll() {
-        _configs.value = emptyList()
-        repo.saveAll(emptyList())
-        _subInfo.value = null
-        _message.value = "Все сервера удалены"
+        viewModelScope.launch {
+            _configs.value = emptyList()
+            repo.saveAll(emptyList())
+            _subInfo.value = null
+            _message.value = "Все сервера удалены"
+        }
     }
 
     fun consumeMessage() { _message.value = null }
