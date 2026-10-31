@@ -55,10 +55,16 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
 
+        // ПУНКТ 3: Надежная остановка старого процесса
         if (isStarting.get() || isRunning.get()) {
-            Log.w("VeloxVPN", "Сервис уже работает. Перезапуск...")
+            Log.w("VeloxVPN", "Сервис уже работает. Принудительная остановка перед перезапуском...")
             stopVpn(null)
-            try { Thread.sleep(500) } catch (e: InterruptedException) {}
+            // Ждем, пока isRunning и isStarting станут false (макс 2 секунды)
+            var waited = 0
+            while ((isRunning.get() || isStarting.get()) && waited < 2000) {
+                try { Thread.sleep(100) } catch (e: InterruptedException) {}
+                waited += 100
+            }
         }
 
         isStarting.set(true)
@@ -94,10 +100,13 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         }
 
         try {
+            // ПУНКТ 5: Возвращаем IPv6 для совместимости
             val builder = Builder()
                 .setSession("Velox VPN")
                 .addAddress("10.255.0.2", 30)
+                .addAddress("fd00::1", 128)
                 .addRoute("0.0.0.0", 0)
+                .addRoute("::", 0)
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
                 .setMtu(1280)
@@ -139,7 +148,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 if (isPortOpen(10808)) { portOpen = true; break }
             }
             if (!portOpen) {
-                stopVpn("Xray не открыл порт")
+                stopVpn("Xray не открыл порт 10808 за 10 секунд")
                 return
             }
 
@@ -178,6 +187,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 100); true }
     } catch (e: Exception) { false }
 
+    // ПУНКТ 4: Возвращаем подробное логирование
     private fun checkRealInternetThroughProxy(): Boolean {
         return try {
             val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))
@@ -194,8 +204,10 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             val response = client.newCall(request).execute()
             val code = response.code
             response.close()
+            Log.d("VeloxVPN", "Проверка прокси: код $code")
             code == 204 || code == 200
         } catch (e: Exception) {
+            Log.e("VeloxVPN", "Ошибка проверки прокси: ${e.message}")
             showToast("Ошибка прокси: ${e.message}")
             false
         }
@@ -205,9 +217,11 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     override fun shutdown(): Long = 0
     override fun onEmitStatus(l: Long, s: String?): Long = 0
 
+    // ПУНКТ 5: IPv6 в конфиге HEV
     private fun buildHevYaml(logPath: String) = """
         tunnel:
           ipv4: 10.255.0.2
+          ipv6: 'fd00::1'
           mtu: 1280
         socks5:
           address: 127.0.0.1
@@ -282,9 +296,11 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val type = uri.getQueryParameter("type") ?: "tcp"
         outbound.put("protocol", "vless")
         
+        // ПУНКТ 1: Возвращаем flow, если он есть в ссылке
         val user = JSONObject().apply {
             put("id", uri.userInfo)
             put("encryption", "none")
+            uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
         }
         
         outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
@@ -293,11 +309,12 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         
         val stream = JSONObject().apply { put("network", type); put("security", security) }
         if (security == "reality") {
+            // ПУНКТ 2: Берем fingerprint из ссылки
             stream.put("realitySettings", JSONObject().apply {
                 put("serverName", uri.getQueryParameter("sni") ?: uri.host)
                 put("publicKey", uri.getQueryParameter("pbk") ?: "")
                 put("shortId", uri.getQueryParameter("sid") ?: "")
-                put("fingerprint", "chrome")
+                put("fingerprint", uri.getQueryParameter("fp") ?: "chrome")
                 put("spiderX", "/")
             })
         }
