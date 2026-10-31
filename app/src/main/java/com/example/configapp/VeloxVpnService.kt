@@ -172,7 +172,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 .build()
 
             val request = Request.Builder()
-                .url("http://cp.cloudflare.com/generate_204")
+                .url("https://cp.cloudflare.com/generate_204") // ИСПРАВЛЕНО: http на https
                 .build()
 
             val response = client.newCall(request).execute()
@@ -182,7 +182,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             code == 204 || code == 200
         } catch (e: Exception) {
             Log.e("VeloxVPN", "Ошибка проверки прокси: ${e.message}")
-            // Показываем точную ошибку, чтобы понять, почему не работает
             showToast("Ошибка прокси: ${e.message}")
             false
         }
@@ -271,7 +270,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val user = JSONObject().apply {
             put("id", uri.userInfo)
             put("encryption", "none")
-            // ВОЗВРАЩАЕМ FLOW
             uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
         }
         
@@ -285,7 +283,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 put("serverName", uri.getQueryParameter("sni") ?: uri.host)
                 put("publicKey", uri.getQueryParameter("pbk") ?: "")
                 put("shortId", uri.getQueryParameter("sid") ?: "")
-                // БЕРЕМ FINGERPRINT ИЗ ССЫЛКИ
                 put("fingerprint", uri.getQueryParameter("fp") ?: "chrome")
                 put("spiderX", "/")
             })
