@@ -55,14 +55,24 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
 
-        if (isStarting.getAndSet(true)) return START_STICKY
+        // ИСПРАВЛЕНИЕ 1 и 2: Обработка повторного запуска
+        if (isStarting.get() || isRunning.get()) {
+            Log.w("VeloxVPN", "Сервис уже запущен или запускается, перезапускаем...")
+            stopVpn(null)
+            try { Thread.sleep(300) } catch (e: InterruptedException) {}
+        }
+
+        isStarting.set(true)
         isStoppedByUser.set(false)
         isStopping.set(false)
 
+        // ИСПРАВЛЕНИЕ 6: Проверка на Android 14+ и startForeground
         try {
             startForeground(1, createNotification())
         } catch (e: Exception) {
-            Log.e("VeloxVPN", "Ошибка startForeground: ${e.message}")
+            Log.e("VeloxVPN", "Фатальная ошибка startForeground: ${e.message}")
+            stopVpn("Ошибка запуска сервиса уведомлений")
+            return START_NOT_STICKY
         }
 
         Thread {
@@ -79,11 +89,9 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     }
 
     private fun startVpn(configLink: String) {
-        if (isRunning.get()) return
-
         val xrayJson = buildXrayConfig(configLink)
         if (xrayJson == null) {
-            stopVpn("Неверный формат ссылки")
+            stopVpn("Неверный формат ссылки или неподдерживаемый протокол (Hysteria2)")
             return
         }
 
@@ -91,18 +99,27 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             val builder = Builder()
                 .setSession("Velox VPN")
                 .addAddress("10.255.0.2", 30)
+                .addAddress("fd00::1", 128) // IPv6
                 .addRoute("0.0.0.0", 0)
+                .addRoute("::", 0)          // Маршрут для IPv6
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
-                .setMtu(1400)
+                .setMtu(1280)
                 .setBlocking(true)
 
             try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {}
 
-            vpnInterface = builder.establish()
+            // ИСПРАВЛЕНИЕ 5: Обработка ошибки establish()
+            try {
+                vpnInterface = builder.establish()
+            } catch (e: Exception) {
+                stopVpn("Android не разрешил создать VPN: ${e.message}")
+                return
+            }
+
             val fd = vpnInterface?.fd
             if (fd == null || fd == -1) {
-                stopVpn("Не удалось создать TUN")
+                stopVpn("Не удалось создать TUN-интерфейс")
                 return
             }
 
@@ -116,15 +133,15 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 }
             }.start()
 
-            // 2. Ждём, пока Xray откроет порт
+            // ИСПРАВЛЕНИЕ 3: Увеличили проверку порта до 10 секунд (50 * 200мс)
             var portOpen = false
-            for (i in 0 until 15) {
+            for (i in 0 until 50) {
                 TimeUnit.MILLISECONDS.sleep(200)
                 if (isStoppedByUser.get()) return
                 if (isPortOpen(10808)) { portOpen = true; break }
             }
             if (!portOpen) {
-                stopVpn("Xray не открыл порт 10808")
+                stopVpn("Xray не открыл порт 10808 за 10 секунд")
                 return
             }
 
@@ -140,6 +157,9 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 }
             }.apply { isDaemon = true }
             tunnelThread?.start()
+
+            // ИСПРАВЛЕНИЕ 4: Ждем 1.5 секунды, чтобы HEV успел поднять туннель перед проверкой
+            TimeUnit.MILLISECONDS.sleep(1500)
 
             // 4. Проверяем интернет через SOCKS-прокси
             Thread {
@@ -167,12 +187,12 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))
             val client = OkHttpClient.Builder()
                 .proxy(proxy)
-                .connectTimeout(10, TimeUnit.SECONDS) // Увеличили таймаут
-                .readTimeout(10, TimeUnit.SECONDS)    // Увеличили таймаут
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(10, TimeUnit.SECONDS)
                 .build()
 
             val request = Request.Builder()
-                .url("https://www.gstatic.com/generate_204") // Более надежный адрес
+                .url("https://www.gstatic.com/generate_204")
                 .build()
 
             val response = client.newCall(request).execute()
@@ -194,7 +214,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private fun buildHevYaml(logPath: String) = """
         tunnel:
           ipv4: 10.255.0.2
-          mtu: 1400
+          ipv6: 'fd00::1'
+          mtu: 1280
         socks5:
           address: 127.0.0.1
           port: 10808
@@ -215,6 +236,12 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
     private fun buildXrayConfig(link: String): String? {
         try {
+            // ИСПРАВЛЕНИЕ 7: Полностью блокируем Hysteria2
+            if (link.startsWith("hysteria2://", true) || link.startsWith("hy2://", true)) {
+                Log.e("VeloxVPN", "Hysteria2 не поддерживается этим ядром")
+                return null
+            }
+
             val root = JSONObject()
             root.put("log", JSONObject().put("loglevel", "warning"))
             root.put("dns", JSONObject().put("servers", JSONArray().put("1.1.1.1").put("8.8.8.8")))
@@ -246,7 +273,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             root.put("outbounds", outbounds)
 
             val routing = JSONObject()
-            routing.put("domainStrategy", "IPIfNonMatch")
             val rules = JSONArray()
             val localRule = JSONObject().apply {
                 put("type", "field")
@@ -270,7 +296,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val user = JSONObject().apply {
             put("id", uri.userInfo)
             put("encryption", "none")
-            uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
         }
         
         outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
