@@ -37,8 +37,8 @@ fun ConfigScreen(
     viewModel: ConfigViewModel, 
     theme: AppTheme,
     isConnected: Boolean,
-    isConnecting: Boolean, 
-    onToggleConnection: (Boolean, Boolean) -> Unit 
+    isConnecting: Boolean,
+    onToggleConnection: (Boolean, Boolean) -> Unit
 ) {
     val configs by viewModel.configs.collectAsState()
     val subInfo by viewModel.subInfo.collectAsState()
@@ -90,7 +90,7 @@ fun ConfigScreen(
                         .size(160.dp)
                         .clip(CircleShape)
                         .background(if (isConnected) theme.accent else theme.cardBg)
-                        .clickable(enabled = !isConnecting) { 
+                        .clickable(enabled = !isConnecting) {
                             if (isConnected) {
                                 val intent = Intent(context, VeloxVpnService::class.java).apply { action = "STOP" }
                                 context.startService(intent)
@@ -100,7 +100,7 @@ fun ConfigScreen(
                                     Toast.makeText(context, "Сначала добавьте сервер", Toast.LENGTH_SHORT).show()
                                     return@clickable
                                 }
-                                onToggleConnection(true, false) 
+                                onToggleConnection(true, false)
                                 
                                 val prepareIntent = VpnService.prepare(context)
                                 if (prepareIntent != null) {
