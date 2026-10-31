@@ -13,29 +13,19 @@ import android.util.Base64
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
-import hev.sockstun.TProxyService
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
-import java.net.InetSocketAddress
-import java.net.Proxy
-import java.net.Socket
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var coreController: CoreController? = null
-    private var tunnelThread: Thread? = null
     private val isRunning = AtomicBoolean(false)
     private val isStarting = AtomicBoolean(false)
     private val isStopping = AtomicBoolean(false)
-    private val isStoppedByUser = AtomicBoolean(false)
 
     companion object {
         const val ACTION_VPN_STATE = "com.example.configapp.VPN_STATE"
@@ -48,7 +38,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP") {
-            isStoppedByUser.set(true)
             stopVpn(null)
             return START_NOT_STICKY
         }
@@ -56,7 +45,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
 
         if (isStarting.getAndSet(true)) return START_STICKY
-        isStoppedByUser.set(false)
         isStopping.set(false)
 
         try {
@@ -106,113 +94,28 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 return
             }
 
-            // 1. Запускаем Xray (SOCKS)
             coreController = Libv2ray.newCoreController(this)
-            Thread {
-                try {
-                    coreController?.startLoop(xrayJson, 0)
-                } catch (e: Throwable) {
-                    if (!isStoppedByUser.get()) stopVpn("Xray упал: ${e.message}")
-                }
-            }.start()
-
-            // 2. Ждём открытия SOCKS-порта
-            var portOpen = false
-            for (i in 0 until 15) {
-                TimeUnit.MILLISECONDS.sleep(200)
-                if (isStoppedByUser.get()) return
-                if (isPortOpen(10808)) { portOpen = true; break }
-            }
-            if (!portOpen) {
-                stopVpn("Xray не открыл порт 10808")
-                return
-            }
-
-            // 3. Запускаем HEV
-            val yamlFile = File(filesDir, "hev_config.yaml")
-            yamlFile.writeText(buildHevYaml(filesDir.absolutePath + "/hev.log"))
-
-            tunnelThread = Thread {
-                try {
-                    Log.d("VeloxVPN", "Запускаем HEV мост...")
-                    TProxyService.TProxyStartService(yamlFile.absolutePath, fd)
-                    Log.d("VeloxVPN", "HEV мост запущен")
-                } catch (e: Throwable) {
-                    if (!isStoppedByUser.get()) {
-                        Log.e("VeloxVPN", "HEV упал: ${e.message}")
-                        stopVpn("HEV упал: ${e.message}")
-                    }
-                }
-            }.apply { isDaemon = true }
-            tunnelThread?.start()
-
-            // 4. Проверка интернета через OkHttp (более надежно, чем HttpURLConnection)
-            Thread {
-                TimeUnit.MILLISECONDS.sleep(500)
-                if (isStoppedByUser.get()) return@Thread
-                
-                val ok = checkRealInternetThroughProxy()
-                if (!isStoppedByUser.get()) {
-                    if (ok) {
-                        isRunning.set(true)
-                        sendStateBroadcast(STATE_CONNECTED, null)
-                    } else {
-                        stopVpn("Интернет не работает (проверка через прокси не удалась)")
-                    }
-                }
-            }.start()
-
+            
+            // Передаем fd прямо в Xray. Он сам разберется с трафиком.
+            coreController?.startLoop(xrayJson, fd)
+            
+            Log.d("VeloxVPN", "Xray запущен с TUN")
+            isRunning.set(true)
+            sendStateBroadcast(STATE_CONNECTED, null)
+            
         } catch (e: Throwable) {
             stopVpn("Ошибка запуска: ${e.message}")
         }
     }
 
-    private fun isPortOpen(port: Int): Boolean = try {
-        Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 100); true }
-    } catch (e: Exception) { false }
-
-    // ИСПОЛЬЗУЕМ OKHTTP ДЛЯ ПРОВЕРКИ SOCKS-ПРОКСИ
-    private fun checkRealInternetThroughProxy(): Boolean {
-        return try {
-            val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))
-            val client = OkHttpClient.Builder()
-                .proxy(proxy)
-                .connectTimeout(5, TimeUnit.SECONDS)
-                .readTimeout(5, TimeUnit.SECONDS)
-                .build()
-
-            val request = Request.Builder()
-                .url("http://cp.cloudflare.com/generate_204")
-                .header("User-Agent", "Velox/1.0")
-                .build()
-
-            val response = client.newCall(request).execute()
-            val code = response.code
-            response.close()
-            Log.d("VeloxVPN", "Проверка прокси: код $code")
-            code == 204 || code == 200
-        } catch (e: Exception) {
-            Log.e("VeloxVPN", "Ошибка проверки прокси: ${e.message}")
-            false
-        }
-    }
-
     override fun startup(): Long = 0
-    override fun shutdown(): Long = 0
+    override fun shutdown(): Long {
+        if (isRunning.get() && !isStopping.get()) {
+            stopVpn("Ядро Xray остановилось")
+        }
+        return 0
+    }
     override fun onEmitStatus(l: Long, s: String?): Long = 0
-
-    private fun buildHevYaml(logPath: String) = """
-        tunnel:
-          ipv4: 10.255.0.2
-          mtu: 1500
-        socks5:
-          address: 127.0.0.1
-          port: 10808
-          udp: 'udp'
-        misc:
-          log-file: $logPath
-          log-level: debug
-    """.trimIndent()
 
     private fun sendStateBroadcast(state: String, error: String?) {
         val intent = Intent(ACTION_VPN_STATE).apply {
@@ -242,10 +145,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 link.startsWith("ss://", true) -> buildShadowsocksOutbound(link, outbound)
                 link.startsWith("vmess://", true) -> buildVmessOutbound(link, outbound)
                 link.startsWith("trojan://", true) -> buildTrojanOutbound(link, outbound)
-                link.startsWith("hysteria2://", true) || link.startsWith("hy2://", true) -> {
-                    Log.e("VeloxVPN", "Hysteria2 не поддерживается Xray")
-                    return null
-                }
                 else -> return null
             }
             outbounds.put(outbound)
@@ -354,17 +253,18 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         })
     }
 
-    // ИСПРАВЛЕННАЯ ОСТАНОВКА: сначала убираем сервис, потом чистим ресурсы
     private fun stopVpn(errorMsg: String?) {
         if (isStopping.getAndSet(true)) return
         isRunning.set(false)
-        isStoppedByUser.set(true)
 
-        // 1. Сразу отвязываем уведомление и убиваем сервис, чтобы вернуть интернет
+        // 1. Закрываем TUN и отвязываем сервис, чтобы моментально вернуть интернет
+        val pfd = vpnInterface
+        vpnInterface = null
+        try { pfd?.close() } catch (e: Throwable) {}
+
         stopForeground(true)
         stopSelf()
 
-        // 2. Показываем ошибку, если она есть
         if (errorMsg != null) {
             sendStateBroadcast(STATE_ERROR, errorMsg)
             showToast(errorMsg)
@@ -372,19 +272,11 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             sendStateBroadcast(STATE_DISCONNECTED, null)
         }
 
-        // 3. В фоне закрываем TUN и останавливаем нативные потоки
-        val pfd = vpnInterface
-        vpnInterface = null
+        // 2. Останавливаем ядро в фоне
         val ctrl = coreController
         coreController = null
-        val thread = tunnelThread
-        tunnelThread = null
-
         Thread {
-            try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
-            thread?.interrupt()
             try { ctrl?.stopLoop() } catch (e: Throwable) {}
-            try { pfd?.close() } catch (e: Throwable) {}
         }.start()
     }
 
