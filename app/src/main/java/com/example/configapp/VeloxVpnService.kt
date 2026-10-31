@@ -28,6 +28,7 @@ import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -38,8 +39,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private val isStopping = AtomicBoolean(false)
     private val isStoppedByUser = AtomicBoolean(false)
 
-    // ИСПРАВЛЕНО: Ждем реальной остановки старого процесса
-    private var cleanupLatch: CountDownLatch? = null
+    // ИСПРАВЛЕНО (п.1, п.2): Используем AtomicReference для потокобезопасности
+    private val cleanupLatchRef = AtomicReference<CountDownLatch?>(null)
 
     companion object {
         const val ACTION_VPN_STATE = "com.example.configapp.VPN_STATE"
@@ -59,15 +60,25 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
 
-        // ИСПРАВЛЕНО: Если уже запущено — останавливаем и ЖДЕМ завершения очистки
+        // ИСПРАВЛЕНО (п.1, п.2, п.3): Надежное ожидание очистки
         if (isStarting.get() || isRunning.get()) {
-            Log.w("VeloxVPN", "Сервис уже работает. Запуск очистки...")
+            Log.w("VeloxVPN", "Сервис уже работает. Принудительная остановка...")
             stopVpn(null)
-            try {
-                // Ждем максимум 5 секунд, пока старый TUN/HEV не умрут
-                cleanupLatch?.await(5, TimeUnit.SECONDS)
-            } catch (e: InterruptedException) {
-                Log.e("VeloxVPN", "Ожидание очистки прервано")
+            
+            val latch = cleanupLatchRef.get()
+            if (latch != null) {
+                try {
+                    val success = latch.await(5, TimeUnit.SECONDS)
+                    if (!success) {
+                        Log.e("VeloxVPN", "Таймаут ожидания очистки старого VPN (5 сек)")
+                    } else {
+                        Log.d("VeloxVPN", "Старый VPN успешно очищен")
+                    }
+                } catch (e: InterruptedException) {
+                    Log.e("VeloxVPN", "Ожидание очистки прервано: ${e.message}")
+                }
+            } else {
+                 Log.w("VeloxVPN", "Latch не был создан, пропускаем ожидание")
             }
         }
 
@@ -167,19 +178,29 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             }.apply { isDaemon = true }
             tunnelThread?.start()
 
-            TimeUnit.MILLISECONDS.sleep(2000)
-            if (isStoppedByUser.get()) return
-
-            // Проверяем реальную статистику HEV (пересылает ли он байты)
+            // ИСПРАВЛЕНО (п.4, п.5, п.6): Цикл проверки статистики HEV
             var hevWorking = false
-            try {
-                val stats = TProxyService.TProxyGetStats()
-                if (stats != null && stats.size >= 2 && (stats[0] > 0 || stats[1] > 0)) {
-                    hevWorking = true
-                    Log.d("VeloxVPN", "HEV пересылает байты: TX=${stats[0]}, RX=${stats[1]}")
+            for (i in 0 until 10) { // 10 раз по 500мс = 5 секунд
+                TimeUnit.MILLISECONDS.sleep(500)
+                if (isStoppedByUser.get()) return
+                try {
+                    val stats = TProxyService.TProxyGetStats()
+                    if (stats != null && stats.size >= 2) {
+                        val tx = stats[0]
+                        val rx = stats[1]
+                        if (tx > 0 || rx > 0) {
+                            Log.d("VeloxVPN", "HEV пересылает байты: TX=$tx, RX=$rx")
+                            hevWorking = true
+                            break
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.e("VeloxVPN", "Ошибка статистики HEV: ${e.message}")
                 }
-            } catch (e: Throwable) {
-                Log.e("VeloxVPN", "Не удалось получить статистику HEV: ${e.message}")
+            }
+
+            if (!hevWorking) {
+                Log.w("VeloxVPN", "Статистика HEV пуста, но продолжаем (возможно, трафика еще нет)")
             }
 
             Thread {
@@ -403,6 +424,10 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         if (isStopping.getAndSet(true)) return
         isRunning.set(false)
 
+        // ИСПРАВЛЕНО (п.1, п.2): Создаем Latch ДО запуска потока очистки
+        val latch = CountDownLatch(1)
+        cleanupLatchRef.set(latch)
+
         val pfd = vpnInterface
         vpnInterface = null
         try { pfd?.close() } catch (e: Throwable) {}
@@ -422,16 +447,13 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val thread = tunnelThread
         tunnelThread = null
 
-        // ИСПРАВЛЕНО: Блокируем и ждем полной очистки перед тем, как отпустить Latch
-        cleanupLatch = CountDownLatch(1)
-        val latch = cleanupLatch
-
         Thread {
             try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
             thread?.interrupt()
             try { ctrl?.stopLoop() } catch (e: Throwable) {}
-            // Когда всё остановлено — подаем сигнал
-            latch?.countDown()
+            // ИСПРАВЛЕНО: Сигнализируем об окончании очистки
+            latch.countDown()
+            Log.d("VeloxVPN", "Очистка завершена, Latch отпущен")
         }.start()
     }
 
