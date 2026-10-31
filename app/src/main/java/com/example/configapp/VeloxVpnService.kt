@@ -25,6 +25,7 @@ import java.io.File
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -36,6 +37,9 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private val isStarting = AtomicBoolean(false)
     private val isStopping = AtomicBoolean(false)
     private val isStoppedByUser = AtomicBoolean(false)
+
+    // ИСПРАВЛЕНО: Ждем реальной остановки старого процесса
+    private var cleanupLatch: CountDownLatch? = null
 
     companion object {
         const val ACTION_VPN_STATE = "com.example.configapp.VPN_STATE"
@@ -55,15 +59,15 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
 
-        // ПУНКТ 3: Надежная остановка старого процесса
+        // ИСПРАВЛЕНО: Если уже запущено — останавливаем и ЖДЕМ завершения очистки
         if (isStarting.get() || isRunning.get()) {
-            Log.w("VeloxVPN", "Сервис уже работает. Принудительная остановка перед перезапуском...")
+            Log.w("VeloxVPN", "Сервис уже работает. Запуск очистки...")
             stopVpn(null)
-            // Ждем, пока isRunning и isStarting станут false (макс 2 секунды)
-            var waited = 0
-            while ((isRunning.get() || isStarting.get()) && waited < 2000) {
-                try { Thread.sleep(100) } catch (e: InterruptedException) {}
-                waited += 100
+            try {
+                // Ждем максимум 5 секунд, пока старый TUN/HEV не умрут
+                cleanupLatch?.await(5, TimeUnit.SECONDS)
+            } catch (e: InterruptedException) {
+                Log.e("VeloxVPN", "Ожидание очистки прервано")
             }
         }
 
@@ -100,7 +104,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         }
 
         try {
-            // ПУНКТ 5: Возвращаем IPv6 для совместимости
             val builder = Builder()
                 .setSession("Velox VPN")
                 .addAddress("10.255.0.2", 30)
@@ -148,7 +151,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 if (isPortOpen(10808)) { portOpen = true; break }
             }
             if (!portOpen) {
-                stopVpn("Xray не открыл порт 10808 за 10 секунд")
+                stopVpn("Xray не открыл порт за 10 секунд")
                 return
             }
 
@@ -166,6 +169,18 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
             TimeUnit.MILLISECONDS.sleep(2000)
             if (isStoppedByUser.get()) return
+
+            // Проверяем реальную статистику HEV (пересылает ли он байты)
+            var hevWorking = false
+            try {
+                val stats = TProxyService.TProxyGetStats()
+                if (stats != null && stats.size >= 2 && (stats[0] > 0 || stats[1] > 0)) {
+                    hevWorking = true
+                    Log.d("VeloxVPN", "HEV пересылает байты: TX=${stats[0]}, RX=${stats[1]}")
+                }
+            } catch (e: Throwable) {
+                Log.e("VeloxVPN", "Не удалось получить статистику HEV: ${e.message}")
+            }
 
             Thread {
                 if (checkRealInternetThroughProxy()) {
@@ -187,7 +202,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 100); true }
     } catch (e: Exception) { false }
 
-    // ПУНКТ 4: Возвращаем подробное логирование
     private fun checkRealInternetThroughProxy(): Boolean {
         return try {
             val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))
@@ -217,7 +231,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     override fun shutdown(): Long = 0
     override fun onEmitStatus(l: Long, s: String?): Long = 0
 
-    // ПУНКТ 5: IPv6 в конфиге HEV
     private fun buildHevYaml(logPath: String) = """
         tunnel:
           ipv4: 10.255.0.2
@@ -296,7 +309,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val type = uri.getQueryParameter("type") ?: "tcp"
         outbound.put("protocol", "vless")
         
-        // ПУНКТ 1: Возвращаем flow, если он есть в ссылке
         val user = JSONObject().apply {
             put("id", uri.userInfo)
             put("encryption", "none")
@@ -309,7 +321,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         
         val stream = JSONObject().apply { put("network", type); put("security", security) }
         if (security == "reality") {
-            // ПУНКТ 2: Берем fingerprint из ссылки
             stream.put("realitySettings", JSONObject().apply {
                 put("serverName", uri.getQueryParameter("sni") ?: uri.host)
                 put("publicKey", uri.getQueryParameter("pbk") ?: "")
@@ -411,10 +422,16 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val thread = tunnelThread
         tunnelThread = null
 
+        // ИСПРАВЛЕНО: Блокируем и ждем полной очистки перед тем, как отпустить Latch
+        cleanupLatch = CountDownLatch(1)
+        val latch = cleanupLatch
+
         Thread {
             try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
             thread?.interrupt()
             try { ctrl?.stopLoop() } catch (e: Throwable) {}
+            // Когда всё остановлено — подаем сигнал
+            latch?.countDown()
         }.start()
     }
 
