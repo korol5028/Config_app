@@ -55,7 +55,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
 
-        // ИСПРАВЛЕНИЕ 1 и 2: Обработка повторного запуска
         if (isStarting.get() || isRunning.get()) {
             Log.w("VeloxVPN", "Сервис уже запущен или запускается, перезапускаем...")
             stopVpn(null)
@@ -66,7 +65,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         isStoppedByUser.set(false)
         isStopping.set(false)
 
-        // ИСПРАВЛЕНИЕ 6: Проверка на Android 14+ и startForeground
         try {
             startForeground(1, createNotification())
         } catch (e: Exception) {
@@ -99,17 +97,16 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             val builder = Builder()
                 .setSession("Velox VPN")
                 .addAddress("10.255.0.2", 30)
-                .addAddress("fd00::1", 128) // IPv6
+                .addAddress("fd00::1", 128) 
                 .addRoute("0.0.0.0", 0)
-                .addRoute("::", 0)          // Маршрут для IPv6
+                .addRoute("::", 0)          
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
-                .setMtu(1280)
+                .setMtu(1280) 
                 .setBlocking(true)
 
             try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {}
 
-            // ИСПРАВЛЕНИЕ 5: Обработка ошибки establish()
             try {
                 vpnInterface = builder.establish()
             } catch (e: Exception) {
@@ -123,17 +120,15 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 return
             }
 
-            // 1. Запускаем Xray как SOCKS-прокси (БЕЗ TUN)
             coreController = Libv2ray.newCoreController(this)
             Thread {
                 try {
-                    coreController?.startLoop(xrayJson, 0) // 0 = без TUN
+                    coreController?.startLoop(xrayJson, 0) 
                 } catch (e: Throwable) {
                     if (!isStoppedByUser.get()) stopVpn("Xray упал: ${e.message}")
                 }
             }.start()
 
-            // ИСПРАВЛЕНИЕ 3: Увеличили проверку порта до 10 секунд (50 * 200мс)
             var portOpen = false
             for (i in 0 until 50) {
                 TimeUnit.MILLISECONDS.sleep(200)
@@ -145,7 +140,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 return
             }
 
-            // 3. Запускаем HEV мост
             val yamlFile = File(filesDir, "hev_config.yaml")
             yamlFile.writeText(buildHevYaml(filesDir.absolutePath + "/hev.log"))
 
@@ -158,10 +152,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             }.apply { isDaemon = true }
             tunnelThread?.start()
 
-            // ИСПРАВЛЕНИЕ 4: Ждем 1.5 секунды, чтобы HEV успел поднять туннель перед проверкой
             TimeUnit.MILLISECONDS.sleep(1500)
 
-            // 4. Проверяем интернет через SOCKS-прокси
             Thread {
                 if (checkRealInternetThroughProxy()) {
                     if (!isStoppedByUser.get()) {
@@ -236,7 +228,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
     private fun buildXrayConfig(link: String): String? {
         try {
-            // ИСПРАВЛЕНИЕ 7: Полностью блокируем Hysteria2
             if (link.startsWith("hysteria2://", true) || link.startsWith("hy2://", true)) {
                 Log.e("VeloxVPN", "Hysteria2 не поддерживается этим ядром")
                 return null
@@ -296,6 +287,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val user = JSONObject().apply {
             put("id", uri.userInfo)
             put("encryption", "none")
+            // ВОЗВРАЩАЕМ FLOW (он обязателен для твоего сервера)
+            uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
         }
         
         outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
@@ -308,7 +301,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 put("serverName", uri.getQueryParameter("sni") ?: uri.host)
                 put("publicKey", uri.getQueryParameter("pbk") ?: "")
                 put("shortId", uri.getQueryParameter("sid") ?: "")
-                put("fingerprint", uri.getQueryParameter("fp") ?: "chrome")
+                // БЕРЕМ FIREFOX ИЗ ССЫЛКИ
+                put("fingerprint", uri.getQueryParameter("fp") ?: "firefox")
                 put("spiderX", "/")
             })
         }
