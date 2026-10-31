@@ -17,14 +17,14 @@ import hev.sockstun.TProxyService
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
-import java.net.URL
-import java.net.HttpURLConnection
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -134,14 +134,19 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
             tunnelThread = Thread {
                 try {
+                    Log.d("VeloxVPN", "Запускаем HEV мост...")
                     TProxyService.TProxyStartService(yamlFile.absolutePath, fd)
+                    Log.d("VeloxVPN", "HEV мост запущен")
                 } catch (e: Throwable) {
-                    if (!isStoppedByUser.get()) stopVpn("HEV упал: ${e.message}")
+                    if (!isStoppedByUser.get()) {
+                        Log.e("VeloxVPN", "HEV упал: ${e.message}")
+                        stopVpn("HEV упал: ${e.message}")
+                    }
                 }
             }.apply { isDaemon = true }
             tunnelThread?.start()
 
-            // 4. Проверка интернета ЧЕРЕЗ ПРОКСИ
+            // 4. Проверка интернета через OkHttp (более надежно, чем HttpURLConnection)
             Thread {
                 TimeUnit.MILLISECONDS.sleep(500)
                 if (isStoppedByUser.get()) return@Thread
@@ -166,19 +171,30 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 100); true }
     } catch (e: Exception) { false }
 
-    // ИЗМЕНЕНО: Более надежный URL для проверки
-    private fun checkRealInternetThroughProxy(): Boolean = try {
-        val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))
-        val url = URL("http://cp.cloudflare.com/generate_204")
-        val conn = url.openConnection(proxy) as HttpURLConnection
-        conn.connectTimeout = 5000
-        conn.readTimeout = 5000
-        val code = conn.responseCode
-        conn.disconnect()
-        code == 204 || code == 200
-    } catch (e: Exception) {
-        Log.e("VeloxVPN", "Proxy check failed: ${e.message}")
-        false
+    // ИСПОЛЬЗУЕМ OKHTTP ДЛЯ ПРОВЕРКИ SOCKS-ПРОКСИ
+    private fun checkRealInternetThroughProxy(): Boolean {
+        return try {
+            val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))
+            val client = OkHttpClient.Builder()
+                .proxy(proxy)
+                .connectTimeout(5, TimeUnit.SECONDS)
+                .readTimeout(5, TimeUnit.SECONDS)
+                .build()
+
+            val request = Request.Builder()
+                .url("http://cp.cloudflare.com/generate_204")
+                .header("User-Agent", "Velox/1.0")
+                .build()
+
+            val response = client.newCall(request).execute()
+            val code = response.code
+            response.close()
+            Log.d("VeloxVPN", "Проверка прокси: код $code")
+            code == 204 || code == 200
+        } catch (e: Exception) {
+            Log.e("VeloxVPN", "Ошибка проверки прокси: ${e.message}")
+            false
+        }
     }
 
     override fun startup(): Long = 0
@@ -226,7 +242,10 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 link.startsWith("ss://", true) -> buildShadowsocksOutbound(link, outbound)
                 link.startsWith("vmess://", true) -> buildVmessOutbound(link, outbound)
                 link.startsWith("trojan://", true) -> buildTrojanOutbound(link, outbound)
-                link.startsWith("hysteria2://", true) || link.startsWith("hy2://", true) -> buildHysteria2Outbound(link, outbound)
+                link.startsWith("hysteria2://", true) || link.startsWith("hy2://", true) -> {
+                    Log.e("VeloxVPN", "Hysteria2 не поддерживается Xray")
+                    return null
+                }
                 else -> return null
             }
             outbounds.put(outbound)
@@ -274,7 +293,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         if (at < 0) return
         val userInfo = body.substring(0, at)
         val hostPortStr = body.substring(at + 1)
-        
         val (host, port) = splitHostPort(hostPortStr) ?: return
 
         var method = ""; var password = ""
@@ -336,30 +354,17 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         })
     }
 
-    private fun buildHysteria2Outbound(link: String, outbound: JSONObject) {
-        val uri = Uri.parse(link)
-        outbound.put("protocol", "hysteria")
-        outbound.put("settings", JSONObject().apply {
-            put("version", 2); put("address", uri.host); put("port", uri.port); put("auth", uri.userInfo)
-        })
-        outbound.put("streamSettings", JSONObject().apply {
-            put("network", "hysteria")
-            put("security", "tls")
-            put("tlsSettings", JSONObject().put("serverName", uri.getQueryParameter("sni") ?: uri.host))
-        })
-    }
-
+    // ИСПРАВЛЕННАЯ ОСТАНОВКА: сначала убираем сервис, потом чистим ресурсы
     private fun stopVpn(errorMsg: String?) {
         if (isStopping.getAndSet(true)) return
         isRunning.set(false)
+        isStoppedByUser.set(true)
 
-        val pfd = vpnInterface
-        vpnInterface = null
-        val ctrl = coreController
-        coreController = null
-        val thread = tunnelThread
-        tunnelThread = null
+        // 1. Сразу отвязываем уведомление и убиваем сервис, чтобы вернуть интернет
+        stopForeground(true)
+        stopSelf()
 
+        // 2. Показываем ошибку, если она есть
         if (errorMsg != null) {
             sendStateBroadcast(STATE_ERROR, errorMsg)
             showToast(errorMsg)
@@ -367,13 +372,19 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             sendStateBroadcast(STATE_DISCONNECTED, null)
         }
 
+        // 3. В фоне закрываем TUN и останавливаем нативные потоки
+        val pfd = vpnInterface
+        vpnInterface = null
+        val ctrl = coreController
+        coreController = null
+        val thread = tunnelThread
+        tunnelThread = null
+
         Thread {
             try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
             thread?.interrupt()
             try { ctrl?.stopLoop() } catch (e: Throwable) {}
             try { pfd?.close() } catch (e: Throwable) {}
-            stopForeground(true)
-            stopSelf()
         }.start()
     }
 
