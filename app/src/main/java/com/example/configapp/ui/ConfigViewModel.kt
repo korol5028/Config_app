@@ -138,7 +138,6 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
         return text.split('\n', '\r').map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.mapNotNull { ConfigParser.parse(it) }
     }
 
-    // ИСПРАВЛЕНО: Обернули в корутину
     fun delete(config: ProxyConfig) {
         viewModelScope.launch {
             val updated = _configs.value.filterNot { it.id == config.id }
@@ -147,7 +146,6 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ИСПРАВЛЕНО: Обернули в корутину
     fun clearAll() {
         viewModelScope.launch {
             _configs.value = emptyList()
