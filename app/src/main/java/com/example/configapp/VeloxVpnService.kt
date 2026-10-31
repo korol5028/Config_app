@@ -82,7 +82,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
-                .setMtu(1500)
+                .setMtu(1400) // УМЕНЬШИЛИ MTU, чтобы избежать фрагментации в мобильных сетях
                 .setBlocking(true)
 
             try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {}
@@ -131,10 +131,12 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             val root = JSONObject()
             root.put("log", JSONObject().put("loglevel", "warning"))
             
-            // DNS сервера
-            root.put("dns", JSONObject().put("servers", JSONArray().put("1.1.1.1").put("8.8.8.8")))
+            // 1. Правильный DNS (Xray сам будет их обрабатывать)
+            val dns = JSONObject()
+            dns.put("servers", JSONArray().put("1.1.1.1").put("8.8.8.8"))
+            root.put("dns", dns)
 
-            // Входящее соединение с включенным сниффингом (чтобы понимать домены)
+            // 2. Входящее соединение с обязательным сниффингом
             val inbounds = JSONArray().put(JSONObject().apply {
                 put("port", 10808)
                 put("listen", "127.0.0.1")
@@ -154,31 +156,22 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 link.startsWith("ss://", true) -> buildShadowsocksOutbound(link, outbound)
                 link.startsWith("vmess://", true) -> buildVmessOutbound(link, outbound)
                 link.startsWith("trojan://", true) -> buildTrojanOutbound(link, outbound)
-                else -> return null // Hysteria2 и другие не поддерживаются
+                else -> return null 
             }
             outbounds.put(outbound)
             outbounds.put(JSONObject().put("protocol", "freedom").put("tag", "direct"))
             outbounds.put(JSONObject().put("protocol", "blackhole").put("tag", "block"))
             root.put("outbounds", outbounds)
 
-            // Маршрутизация: локальные адреса и DNS идут напрямую
+            // 3. Упрощенная маршрутизация (только локальные IP идут напрямую)
             val routing = JSONObject()
-            routing.put("domainStrategy", "IPIfNonMatch")
             val rules = JSONArray()
-            
             val localRule = JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().put("10.0.0.0/8").put("172.16.0.0/12").put("192.168.0.0/16").put("127.0.0.0/8"))
                 put("outboundTag", "direct")
             }
-            val dnsRule = JSONObject().apply {
-                put("type", "field")
-                put("port", "53")
-                put("outboundTag", "direct")
-            }
-            
             rules.put(localRule)
-            rules.put(dnsRule)
             routing.put("rules", rules)
             root.put("routing", routing)
             
@@ -195,12 +188,15 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val type = uri.getQueryParameter("type") ?: "tcp"
         outbound.put("protocol", "vless")
         val user = JSONObject().apply {
-            put("id", uri.userInfo); put("encryption", "none")
+            put("id", uri.userInfo)
+            put("encryption", "none")
+            // Важно: flow обязательно должен быть, если он есть в ссылке
             uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
         }
         outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
             put("address", uri.host); put("port", uri.port); put("users", JSONArray().put(user))
         })))
+        
         val stream = JSONObject().apply { put("network", type); put("security", security) }
         if (security == "reality") {
             stream.put("realitySettings", JSONObject().apply {
@@ -284,7 +280,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         if (isStopping.getAndSet(true)) return
         isRunning.set(false)
 
-        // Сначала закрываем TUN и убиваем сервис, чтобы мгновенно вернуть интернет
         val pfd = vpnInterface
         vpnInterface = null
         try { pfd?.close() } catch (e: Throwable) {}
@@ -299,7 +294,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             sendStateBroadcast(STATE_DISCONNECTED, null)
         }
 
-        // Останавливаем ядро в фоне
         val ctrl = coreController
         coreController = null
         Thread {
