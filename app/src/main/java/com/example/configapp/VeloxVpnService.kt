@@ -265,11 +265,14 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val security = uri.getQueryParameter("security") ?: "reality"
         val type = uri.getQueryParameter("type") ?: "tcp"
         outbound.put("protocol", "vless")
+        
         val user = JSONObject().apply {
             put("id", uri.userInfo)
             put("encryption", "none")
-            uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
+            // ВРЕМЕННО УБРАЛИ FLOW, ЧТОБЫ ПРОВЕРИТЬ СОВМЕСТИМОСТЬ С HEV
+            // uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
         }
+        
         outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
             put("address", uri.host); put("port", uri.port); put("users", JSONArray().put(user))
         })))
