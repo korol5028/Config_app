@@ -149,7 +149,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                         sendStateBroadcast(STATE_CONNECTED, null)
                     }
                 } else {
-                    stopVpn("Интернет не работает (проверка через прокси не удалась)")
+                    stopVpn("Прокси не работает")
                 }
             }.start()
 
@@ -182,6 +182,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             code == 204 || code == 200
         } catch (e: Exception) {
             Log.e("VeloxVPN", "Ошибка проверки прокси: ${e.message}")
+            // Показываем точную ошибку, чтобы понять, почему не работает
+            showToast("Ошибка прокси: ${e.message}")
             false
         }
     }
@@ -269,8 +271,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val user = JSONObject().apply {
             put("id", uri.userInfo)
             put("encryption", "none")
-            // ВРЕМЕННО УБРАЛИ FLOW, ЧТОБЫ ПРОВЕРИТЬ СОВМЕСТИМОСТЬ С HEV
-            // uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
+            // ВОЗВРАЩАЕМ FLOW
+            uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
         }
         
         outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
@@ -283,6 +285,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 put("serverName", uri.getQueryParameter("sni") ?: uri.host)
                 put("publicKey", uri.getQueryParameter("pbk") ?: "")
                 put("shortId", uri.getQueryParameter("sid") ?: "")
+                // БЕРЕМ FINGERPRINT ИЗ ССЫЛКИ
                 put("fingerprint", uri.getQueryParameter("fp") ?: "chrome")
                 put("spiderX", "/")
             })
@@ -361,7 +364,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         if (isStopping.getAndSet(true)) return
         isRunning.set(false)
 
-        // 1. Закрываем TUN, чтобы моментально вернуть интернет
         val pfd = vpnInterface
         vpnInterface = null
         try { pfd?.close() } catch (e: Throwable) {}
@@ -376,7 +378,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             sendStateBroadcast(STATE_DISCONNECTED, null)
         }
 
-        // 2. В фоне останавливаем нативные компоненты
         val ctrl = coreController
         coreController = null
         val thread = tunnelThread
