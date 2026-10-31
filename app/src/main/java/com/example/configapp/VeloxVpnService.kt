@@ -16,8 +16,14 @@ import androidx.core.app.NotificationCompat
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.Socket
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class VeloxVpnService : VpnService(), CoreCallbackHandler {
@@ -26,6 +32,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
     private val isRunning = AtomicBoolean(false)
     private val isStarting = AtomicBoolean(false)
     private val isStopping = AtomicBoolean(false)
+    private val isStoppedByUser = AtomicBoolean(false)
 
     companion object {
         const val ACTION_VPN_STATE = "com.example.configapp.VPN_STATE"
@@ -38,6 +45,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP") {
+            isStoppedByUser.set(true)
             stopVpn(null)
             return START_NOT_STICKY
         }
@@ -45,6 +53,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
 
         if (isStarting.getAndSet(true)) return START_STICKY
+        isStoppedByUser.set(false)
         isStopping.set(false)
 
         try {
@@ -71,7 +80,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
         val xrayJson = buildXrayConfig(configLink)
         if (xrayJson == null) {
-            stopVpn("Неверный формат ссылки или неподдерживаемый протокол")
+            stopVpn("Неверный формат ссылки")
             return
         }
 
@@ -82,7 +91,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
-                .setMtu(1400) // УМЕНЬШИЛИ MTU, чтобы избежать фрагментации в мобильных сетях
+                .setMtu(1400)
                 .setBlocking(true)
 
             try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {}
@@ -96,15 +105,63 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
             coreController = Libv2ray.newCoreController(this)
             
-            // Передаем fd прямо в Xray
-            coreController?.startLoop(xrayJson, fd)
-            
-            Log.d("VeloxVPN", "Xray запущен с TUN")
-            isRunning.set(true)
-            sendStateBroadcast(STATE_CONNECTED, null)
+            // Запускаем startLoop в фоне
+            Thread {
+                try {
+                    coreController?.startLoop(xrayJson, fd)
+                } catch (e: Throwable) {
+                    if (!isStoppedByUser.get()) stopVpn("Xray упал: ${e.message}")
+                }
+            }.start()
+
+            // Проверяем интернет через прокси
+            Thread {
+                if (checkRealInternet()) {
+                    if (!isStoppedByUser.get()) {
+                        isRunning.set(true)
+                        sendStateBroadcast(STATE_CONNECTED, null)
+                    }
+                } else {
+                    stopVpn("Интернет не работает (проверка не удалась)")
+                }
+            }.start()
             
         } catch (e: Throwable) {
             stopVpn("Ошибка запуска: ${e.message}")
+        }
+    }
+
+    private fun isPortOpen(port: Int): Boolean = try {
+        Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 100); true }
+    } catch (e: Exception) { false }
+
+    private fun checkRealInternet(): Boolean {
+        for (i in 0 until 25) {
+            if (isStoppedByUser.get()) return false
+            if (isPortOpen(10808)) break
+            TimeUnit.MILLISECONDS.sleep(200)
+        }
+
+        return try {
+            val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))
+            val client = OkHttpClient.Builder()
+                .proxy(proxy)
+                .connectTimeout(5, TimeUnit.SECONDS)
+                .readTimeout(5, TimeUnit.SECONDS)
+                .build()
+
+            val request = Request.Builder()
+                .url("http://cp.cloudflare.com/generate_204")
+                .build()
+
+            val response = client.newCall(request).execute()
+            val code = response.code
+            response.close()
+            Log.d("VeloxVPN", "Проверка интернета: код $code")
+            code == 204 || code == 200
+        } catch (e: Exception) {
+            Log.e("VeloxVPN", "Ошибка проверки: ${e.message}")
+            false
         }
     }
 
@@ -130,13 +187,8 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         try {
             val root = JSONObject()
             root.put("log", JSONObject().put("loglevel", "warning"))
-            
-            // 1. Правильный DNS (Xray сам будет их обрабатывать)
-            val dns = JSONObject()
-            dns.put("servers", JSONArray().put("1.1.1.1").put("8.8.8.8"))
-            root.put("dns", dns)
+            root.put("dns", JSONObject().put("servers", JSONArray().put("1.1.1.1").put("8.8.8.8")))
 
-            // 2. Входящее соединение с обязательным сниффингом
             val inbounds = JSONArray().put(JSONObject().apply {
                 put("port", 10808)
                 put("listen", "127.0.0.1")
@@ -156,15 +208,15 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 link.startsWith("ss://", true) -> buildShadowsocksOutbound(link, outbound)
                 link.startsWith("vmess://", true) -> buildVmessOutbound(link, outbound)
                 link.startsWith("trojan://", true) -> buildTrojanOutbound(link, outbound)
-                else -> return null 
+                else -> return null
             }
             outbounds.put(outbound)
             outbounds.put(JSONObject().put("protocol", "freedom").put("tag", "direct"))
             outbounds.put(JSONObject().put("protocol", "blackhole").put("tag", "block"))
             root.put("outbounds", outbounds)
 
-            // 3. Упрощенная маршрутизация (только локальные IP идут напрямую)
             val routing = JSONObject()
+            routing.put("domainStrategy", "IPIfNonMatch")
             val rules = JSONArray()
             val localRule = JSONObject().apply {
                 put("type", "field")
@@ -190,7 +242,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
         val user = JSONObject().apply {
             put("id", uri.userInfo)
             put("encryption", "none")
-            // Важно: flow обязательно должен быть, если он есть в ссылке
             uri.getQueryParameter("flow")?.let { if (it.isNotEmpty()) put("flow", it) }
         }
         outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
@@ -204,6 +255,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 put("publicKey", uri.getQueryParameter("pbk") ?: "")
                 put("shortId", uri.getQueryParameter("sid") ?: "")
                 put("fingerprint", uri.getQueryParameter("fp") ?: "chrome")
+                put("spiderX", "/") // КРИТИЧЕСКИ ВАЖНО ДЛЯ REALITY
             })
         }
         outbound.put("streamSettings", stream)
