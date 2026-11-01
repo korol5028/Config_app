@@ -59,7 +59,6 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
         val configLink = intent?.getStringExtra("CONFIG_JSON") ?: return START_NOT_STICKY
 
-        // ИСПРАВЛЕНО (п.1, п.2, п.5)
         if (isStarting.get() || isRunning.get()) {
             Log.w("VeloxVPN", "Сервис уже работает. Принудительная остановка...")
             stopVpn(null)
@@ -69,16 +68,17 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 val success = try {
                     latch.await(5, TimeUnit.SECONDS)
                 } catch (e: InterruptedException) {
+                    Log.e("VeloxVPN", "Ожидание очистки прервано: ${e.message}")
                     false
                 }
                 if (!success) {
-                    Log.e("VeloxVPN", "КРИТИЧЕСКАЯ ОШИБКА: Старый VPN завис. Отмена нового запуска.")
+                    Log.e("VeloxVPN", "КРИТИЧЕСКАЯ ОШИБКА: Старый VPN завис.")
                     sendStateBroadcast(STATE_ERROR, "Ошибка: предыдущий VPN завис. Подождите.")
                     isStarting.set(false)
                     return START_NOT_STICKY
                 }
             }
-            cleanupLatchRef.set(null) // Сброс latch
+            cleanupLatchRef.set(null)
         }
 
         isStarting.set(true)
@@ -125,7 +125,9 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 .setMtu(1280)
                 .setBlocking(true)
 
-            try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {}
+            try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {
+                Log.e("VeloxVPN", "Ошибка exclude app: ${e.message}")
+            }
 
             vpnInterface = try {
                 builder.establish()
@@ -150,6 +152,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 try {
                     coreController?.startLoop(xrayJson, 0)
                 } catch (e: Throwable) {
+                    Log.e("VeloxVPN", "Xray упал: ${e.message}")
                     if (!isStoppedByUser.get()) stopVpn("Xray упал: ${e.message}")
                 }
             }.start()
@@ -172,30 +175,23 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
                 try {
                     TProxyService.TProxyStartService(yamlFile.absolutePath, fd)
                 } catch (e: Throwable) {
+                    Log.e("VeloxVPN", "HEV упал: ${e.message}")
                     if (!isStoppedByUser.get()) stopVpn("HEV упал: ${e.message}")
                 }
             }.apply { isDaemon = true }
             tunnelThread?.start()
 
-            // ИСПРАВЛЕНО (п.3): Если HEV не передает байты, отключаемся
-            var hevWorking = false
-            for (i in 0 until 10) { 
-                TimeUnit.MILLISECONDS.sleep(500)
-                if (isStoppedByUser.get()) return
-                try {
-                    val stats = TProxyService.TProxyGetStats()
-                    if (stats != null && stats.size >= 2) {
-                        if (stats[0] > 0 || stats[1] > 0) {
-                            hevWorking = true
-                            break
-                        }
-                    }
-                } catch (e: Throwable) {}
-            }
-
-            if (!hevWorking) {
-                stopVpn("Мост HEV не передает данные")
-                return
+            // ИСПРАВЛЕНО (п.1, п.2, п.3): Просто логируем статистику, но НЕ вырубаем VPN из-за отсутствия трафика
+            TimeUnit.MILLISECONDS.sleep(1000)
+            if (isStoppedByUser.get()) return
+            
+            try {
+                val stats = TProxyService.TProxyGetStats()
+                if (stats != null && stats.size >= 2) {
+                    Log.d("VeloxVPN", "HEV Stats: TX=${stats[0]}, RX=${stats[1]}")
+                }
+            } catch (e: Throwable) {
+                Log.e("VeloxVPN", "Ошибка получения статистики HEV: ${e.message}")
             }
 
             Thread {
@@ -210,6 +206,7 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
             }.start()
 
         } catch (e: Throwable) {
+            Log.e("VeloxVPN", "Ошибка запуска: ${e.message}")
             stopVpn("Ошибка запуска: ${e.message}")
         }
     }
@@ -424,7 +421,9 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
         val pfd = vpnInterface
         vpnInterface = null
-        try { pfd?.close() } catch (e: Throwable) {}
+        try { pfd?.close() } catch (e: Throwable) {
+            Log.e("VeloxVPN", "Ошибка закрытия TUN: ${e.message}")
+        }
 
         stopForeground(true)
         stopSelf()
@@ -443,9 +442,13 @@ class VeloxVpnService : VpnService(), CoreCallbackHandler {
 
         Thread {
             try {
-                try { TProxyService.TProxyStopService() } catch (e: Throwable) {}
+                try { TProxyService.TProxyStopService() } catch (e: Throwable) {
+                    Log.e("VeloxVPN", "Ошибка TProxyStopService: ${e.message}")
+                }
                 thread?.interrupt()
-                try { ctrl?.stopLoop() } catch (e: Throwable) {}
+                try { ctrl?.stopLoop() } catch (e: Throwable) {
+                    Log.e("VeloxVPN", "Ошибка stopLoop: ${e.message}")
+                }
             } finally {
                 latch.countDown()
                 Log.d("VeloxVPN", "Очистка завершена (finally)")
